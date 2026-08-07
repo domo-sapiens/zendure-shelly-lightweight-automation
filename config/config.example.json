@@ -1,0 +1,45 @@
+{
+  "shelly": {
+    "host": "192.168.0.XX",
+    "hostname": "Shelly",
+    "password": "",
+    "scriptName": "zendure-zero-feedin"
+  },
+
+  "zendure": {
+    "host": "192.168.0.YY",
+    "hostname": "zendure",
+    "maxOutputW": 800,
+    "minOutputW": 0
+  },
+
+  "meter": {
+    "profile": "triphase",
+    "importPositive": true
+  },
+
+  "control": {
+    "intervalMs": 5000,
+    "targetGridW": 20,
+    "gain": 0.8,
+    "deadbandW": 15,
+    "maxStepW": 200,
+    "minWriteDeltaW": 5,
+    "basis": "actual"
+  },
+
+  "battery": {
+    "cutoffSoc": 10,
+    "hysteresis": {
+      "enabled": false,
+      "minSoc": 15,
+      "hystSoc": 20
+    }
+  },
+
+  "http": {
+    "timeoutS": 5
+  },
+
+  "verbose": 2
+}

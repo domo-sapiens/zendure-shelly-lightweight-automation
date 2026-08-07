@@ -1,0 +1,12 @@
+# Real values: IPs, serial numbers, device password. Never commit.
+config/config.local.json
+
+# Generated script with config baked in
+build/
+
+# Raw device dumps (contain serial numbers, MACs, possibly SSIDs)
+notes/*.json
+
+# Local tooling state
+.claude/settings.local.json
+.DS_Store
