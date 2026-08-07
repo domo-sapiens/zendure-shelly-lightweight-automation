@@ -11,13 +11,29 @@ var ZEN_REPORT = "http://" + CFG.zendure.host + "/properties/report";
 var ZEN_WRITE = "http://" + CFG.zendure.host + "/properties/write";
 
 var state = {
-  lastWritten: -1,
+  // Cycle generation. Every tick claims a new number; a callback that finds the
+  // number has moved on is a straggler from a cycle the watchdog already gave up
+  // on, and must not touch shared state.
+  cycle: 0,
+  ticks: 0,
+  busy: false,
+  busySince: 0,
+
+  dischargeBlocked: false,
+
+  pollErrors: 0,
+  writeErrors: 0,
   consecutiveErrors: 0,
-  busy: false
+  skipped: 0,
+  watchdogTrips: 0
 };
 
 function log(level, msg) {
   if (CFG.verbose >= level) print(msg);
+}
+
+function abs(v) {
+  return v < 0 ? -v : v;
 }
 
 function clamp(v, lo, hi) {
@@ -56,6 +72,33 @@ function readGridPower() {
   return p;
 }
 
+// Reserve gate: stop discharging at or below reserveSoc, and do not resume until
+// SoC has recovered to resumeSoc. The gap between the two is what stops the
+// battery chattering on and off at the floor -- with output at 0 the pack
+// voltage relaxes and the reported SoC ticks back up, which without hysteresis
+// would immediately re-enable discharge and cause exactly the cycling wear the
+// reserve exists to avoid.
+//
+// This only ever forces outputLimit to 0. Charging is governed by inputLimit,
+// which this script does not touch, so a blocked battery can still charge.
+function updateDischargeGate(props) {
+  var soc = props.electricLevel;
+
+  if (state.dischargeBlocked) {
+    if (soc >= CFG.battery.resumeSoc) {
+      state.dischargeBlocked = false;
+      log(1, "reserve: SoC " + soc + "% reached resume threshold " +
+             CFG.battery.resumeSoc + "%, discharge re-enabled");
+    }
+  } else if (soc <= CFG.battery.reserveSoc) {
+    state.dischargeBlocked = true;
+    log(1, "reserve: SoC " + soc + "% at or below reserve " +
+           CFG.battery.reserveSoc + "%, discharge blocked");
+  }
+
+  return state.dischargeBlocked;
+}
+
 // The value we regulate *from*. "actual" tracks what the battery really pushes
 // out (outputHomePower), which stops the setpoint from winding up when the
 // battery cannot reach its limit. "limit" reproduces the original forum script.
@@ -65,7 +108,11 @@ function controlBasis(props) {
   return props.outputHomePower;
 }
 
-function computeSetpoint(props, grid) {
+function computeSetpoint(props, grid, blocked) {
+  // Checked before the deadband, so a reserve breach cannot be skipped over by
+  // a cycle that happens to land inside the deadband.
+  if (blocked) return 0;
+
   var error = grid - CFG.control.targetGridW;
 
   if (error > -CFG.control.deadbandW && error < CFG.control.deadbandW) {
@@ -79,16 +126,13 @@ function computeSetpoint(props, grid) {
   if (delta > CFG.control.maxStepW) target = props.outputLimit + CFG.control.maxStepW;
   if (delta < -CFG.control.maxStepW) target = props.outputLimit - CFG.control.maxStepW;
 
-  target = clamp(~~target, CFG.zendure.minOutputW, CFG.zendure.maxOutputW);
-
-  // Battery protection wins over everything else.
-  if (props.electricLevel <= CFG.battery.cutoffSoc) target = 0;
-
-  return target;
+  return clamp(~~target, CFG.zendure.minOutputW, CFG.zendure.maxOutputW);
 }
 
-// Optional charge/discharge hysteresis by moving minSoc. Disabled by default:
-// reported broken on Zendure firmware >= 1.0.23 (rapid toggling at 10-20% SoC).
+// Optional charge/discharge hysteresis by moving minSoc on the device. Disabled
+// by default: reported broken on Zendure firmware >= 1.0.23 (rapid toggling at
+// 10-20% SoC). Independent of the reserve gate above, which is enforced here on
+// the Shelly and needs no cooperation from the Zendure.
 // Returns the new minSoc in device units (percent * 10), or null for no change.
 function computeMinSoc(props) {
   var h = CFG.battery.hysteresis;
@@ -106,7 +150,13 @@ function computeMinSoc(props) {
   return null;
 }
 
-function writeToZendure(sn, outputLimit, minSoc) {
+function release(myCycle) {
+  if (myCycle !== state.cycle) return false; // straggler, watchdog moved on
+  state.busy = false;
+  return true;
+}
+
+function writeToZendure(myCycle, sn, outputLimit, minSoc) {
   var props = { outputLimit: outputLimit };
   if (minSoc !== null) props.minSoc = minSoc;
 
@@ -122,36 +172,70 @@ function writeToZendure(sn, outputLimit, minSoc) {
       headers: { "Content-Type": "application/json" }
     },
     function (res, errCode, errMsg) {
-      state.busy = false;
+      if (!release(myCycle)) return;
       if (errCode !== 0) {
+        state.writeErrors++;
         log(1, "write failed: " + errMsg);
         return;
       }
       if (res.code !== 200) {
+        state.writeErrors++;
         log(1, "write rejected: HTTP " + res.code);
         return;
       }
-      state.lastWritten = outputLimit;
       log(3, "write ok");
     }
   );
 }
 
+function logHealth() {
+  if (CFG.control.healthEveryCycles <= 0) return;
+  if (state.ticks % CFG.control.healthEveryCycles !== 0) return;
+  log(1, "health: ticks=" + state.ticks +
+         " pollErr=" + state.pollErrors +
+         " writeErr=" + state.writeErrors +
+         " skipped=" + state.skipped +
+         " watchdog=" + state.watchdogTrips +
+         " blocked=" + state.dischargeBlocked);
+}
+
 function tick() {
-  // Skip this cycle if the previous round trip has not finished; mJS allows
-  // only a handful of concurrent RPC calls.
+  state.ticks++;
+  logHealth();
+
+  // Watchdog. A Shelly.call whose callback never fires -- which a marginal wifi
+  // link does cause -- would otherwise leave busy set forever and silently stop
+  // the loop regulating, with no error anywhere. Give up on the stuck cycle and
+  // start a fresh one; bumping state.cycle makes any late callback a no-op.
   if (state.busy) {
-    log(2, "previous cycle still in flight, skipping");
-    return;
+    var stuckFor = state.ticks - state.busySince;
+    if (stuckFor < CFG.control.busyTimeoutCycles) {
+      state.skipped++;
+      log(2, "previous cycle still in flight, skipping");
+      return;
+    }
+    state.watchdogTrips++;
+    log(1, "watchdog: cycle stuck for " + stuckFor +
+           " ticks, abandoning it and resuming");
   }
+
+  state.cycle++;
+  var myCycle = state.cycle;
   state.busy = true;
+  state.busySince = state.ticks;
 
   Shelly.call(
     "HTTP.GET",
     { url: ZEN_REPORT, timeout: CFG.http.timeoutS },
     function (res, errCode, errMsg) {
+      if (myCycle !== state.cycle) {
+        log(2, "late report callback from abandoned cycle, ignoring");
+        return;
+      }
+
       if (errCode !== 0 || !res || res.code !== 200) {
-        state.busy = false;
+        release(myCycle);
+        state.pollErrors++;
         state.consecutiveErrors++;
         log(1, "report read failed (" + state.consecutiveErrors + "x): " +
                (errCode !== 0 ? errMsg : "HTTP " + res.code));
@@ -160,7 +244,8 @@ function tick() {
 
       var report = JSON.parse(res.body);
       if (!report || !report.properties) {
-        state.busy = false;
+        release(myCycle);
+        state.pollErrors++;
         state.consecutiveErrors++;
         log(1, "report malformed");
         return;
@@ -170,38 +255,46 @@ function tick() {
       var props = report.properties;
       var grid = readGridPower();
       if (grid === null) {
-        state.busy = false;
+        release(myCycle);
         log(1, "meter not readable, skipping cycle");
         return;
       }
+
+      var blocked = updateDischargeGate(props);
 
       log(3, "soc=" + props.electricLevel + "% minSoc=" + props.minSoc / 10 +
              "% socSet=" + props.socSet / 10 + "% acMode=" + props.acMode +
              " inputLimit=" + props.inputLimit + "W");
       log(2, "grid=" + grid + "W outputLimit=" + props.outputLimit +
              "W outputHomePower=" + props.outputHomePower + "W soc=" +
-             props.electricLevel + "%");
+             props.electricLevel + "%" + (blocked ? " [reserve]" : ""));
 
-      var setpoint = computeSetpoint(props, grid);
+      var setpoint = computeSetpoint(props, grid, blocked);
       var minSoc = computeMinSoc(props);
 
-      var change = setpoint - props.outputLimit;
-      if (change < 0) change = -change;
-      if (change < CFG.control.minWriteDeltaW && minSoc === null) {
-        state.busy = false;
+      // A reserve breach always writes, however small the change: the
+      // minWriteDelta economy must not leave the battery discharging at a
+      // trickle below the reserve.
+      var mustWrite = blocked && props.outputLimit !== 0;
+      var change = abs(setpoint - props.outputLimit);
+
+      if (!mustWrite && change < CFG.control.minWriteDeltaW && minSoc === null) {
+        release(myCycle);
         log(3, "no meaningful change (" + change + "W), not writing");
         return;
       }
 
-      log(2, "-> outputLimit " + props.outputLimit + "W => " + setpoint + "W");
-      writeToZendure(report.sn, setpoint, minSoc);
+      log(2, "-> outputLimit " + props.outputLimit + "W => " + setpoint + "W" +
+             (mustWrite ? " (reserve)" : ""));
+      writeToZendure(myCycle, report.sn, setpoint, minSoc);
     }
   );
 }
 
 log(1, "zendure zero-feed-in starting: zendure=" + CFG.zendure.host +
        " interval=" + CFG.control.intervalMs + "ms target=" +
-       CFG.control.targetGridW + "W");
+       CFG.control.targetGridW + "W reserve=" + CFG.battery.reserveSoc +
+       "%/" + CFG.battery.resumeSoc + "%");
 
 Timer.set(CFG.control.intervalMs, true, tick);
 tick();

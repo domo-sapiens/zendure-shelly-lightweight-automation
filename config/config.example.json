@@ -25,11 +25,14 @@
     "deadbandW": 15,
     "maxStepW": 200,
     "minWriteDeltaW": 5,
-    "basis": "actual"
+    "basis": "actual",
+    "busyTimeoutCycles": 3,
+    "healthEveryCycles": 120
   },
 
   "battery": {
-    "cutoffSoc": 10,
+    "reserveSoc": 15,
+    "resumeSoc": 20,
     "hysteresis": {
       "enabled": false,
       "minSoc": 15,

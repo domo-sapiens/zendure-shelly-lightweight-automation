@@ -91,14 +91,42 @@ tools/deploy.py --stop
   really delivering); `"limit"` regulates from `outputLimit` and reproduces the
   original forum script. `"actual"` avoids the setpoint winding up to 800 W when
   the battery is too empty to follow it.
+- **`busyTimeoutCycles`** — watchdog. If an HTTP callback never fires, the cycle
+  is abandoned after this many ticks and a fresh one starts. Without it a single
+  lost callback stops the loop regulating *silently*, with no error anywhere.
+- **`healthEveryCycles`** — how often to print the counters line (poll errors,
+  write errors, watchdog trips). `120` at a 5 s interval is every 10 minutes.
+  Set `0` to disable.
 
 ### `battery`
 
-- **`cutoffSoc`** — below this SoC, output is forced to 0.
-- **`hysteresis`** — off by default. Moving `minSoc` to force charge/discharge
-  switching was [reported broken on Zendure firmware ≥ 1.0.23](zendure-shelly-direct-shelly-script.md)
-  (rapid toggling between 10–20 % SoC). Only enable it if you are on older
-  firmware or have verified the behaviour yourself.
+- **`reserveSoc`** — at or below this SoC, output is forced to 0. Enforced before
+  the deadband and before the `minWriteDeltaW` economy, so neither can let a
+  discharge slip through.
+- **`resumeSoc`** — discharge only resumes once SoC has climbed back to here. The
+  gap matters: with output at 0 the pack voltage relaxes and the reported SoC
+  ticks up on its own, so a single threshold would re-enable discharge
+  immediately and cycle the battery at its floor — exactly the wear the reserve
+  exists to prevent.
+- **`hysteresis`** — off by default, and unrelated to the reserve above. Moving
+  the device's own `minSoc` to force charge/discharge switching was
+  [reported broken on Zendure firmware ≥ 1.0.23](zendure-shelly-direct-shelly-script.md)
+  (rapid toggling between 10–20 % SoC). The reserve gate needs no cooperation
+  from the Zendure and is not affected by that bug.
+
+Defaults are 15 % / 20 %, which keeps the battery clear of 10 % with margin for
+SoC estimation drift. The Zendure's own `minSoc` (10 % out of the box) stays
+untouched underneath as an independent backstop.
+
+## Testing
+
+The control logic runs against a simulated Shelly environment — no hardware
+needed. Covers the reserve gate, the watchdog, late callbacks from abandoned
+cycles, and normal regulation:
+
+```bash
+python3 tools/deploy.py --build-only && node tools/simulate.js
+```
 
 ## Prerequisite on the Zendure side
 
