@@ -35,6 +35,23 @@ timedatectl status
 
 `System clock synchronized: yes` is what you need.
 
+Then make that true on **every** boot, not just this one:
+
+```bash
+sudo systemctl enable --now systemd-time-wait-sync.service
+```
+
+This is not optional, and the service unit alone does not cover it. The unit
+orders itself `After=time-sync.target`, but that target is reached whether or
+not the clock has actually converged — verified by rebooting and finding the
+collector already running while `timedatectl` still said
+`synchronized: no`. `systemd-time-wait-sync` is the piece that genuinely holds
+the target until NTP lands, and it is not enabled by default.
+
+Costs roughly 20 seconds of boot time. Worth it: without it, every reboot risks
+a handful of samples stamped at whatever the clock read beforehand, silently
+corrupting the series at exactly the moments you most want to inspect.
+
 ## 3. Reduce SD card wear
 
 The database uses WAL with batched commits, which keeps write volume modest.
