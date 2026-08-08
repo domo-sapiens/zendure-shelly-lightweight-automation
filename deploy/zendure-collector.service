@@ -1,0 +1,35 @@
+[Unit]
+Description=Zendure/Shelly logging collector
+Documentation=https://github.com/domo-sapiens/zendure-shelly-lightweight-automation
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
+
+[Service]
+Type=simple
+User=zl
+WorkingDirectory=/home/zl/zendure-shelly-lightweight-automation
+ExecStart=/usr/bin/python3 /home/zl/zendure-shelly-lightweight-automation/tools/collector.py
+Restart=always
+RestartSec=10
+
+# Creates and owns /var/lib/zendure-log, which is collector.dbPath.
+StateDirectory=zendure-log
+
+# The collector only reads two HTTP endpoints and writes one database, so it
+# can give up essentially everything else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+MemoryMax=200M
+
+# SIGTERM makes the collector flush its buffer before exiting; give it room.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -1,5 +1,9 @@
-# Real values: IPs, serial numbers, device password. Never commit.
+# Real values: IPs, serial numbers, device passwords, host credentials.
+# Anything matching *.local.* is secret by convention. Never commit.
+# This repo is public.
 config/config.local.json
+config/*.local.*
+**/*.local.md
 
 # Generated script with config baked in
 build/

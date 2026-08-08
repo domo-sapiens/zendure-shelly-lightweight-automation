@@ -44,5 +44,15 @@
     "timeoutS": 5
   },
 
+  "collector": {
+    "intervalS": 5,
+    "timeoutS": 3,
+    "commitEveryS": 60,
+    "rawRetentionDays": 14,
+    "maintenanceEveryS": 3600,
+    "healthEveryS": 600,
+    "dbPath": "/var/lib/zendure-log/zendure.db"
+  },
+
   "verbose": 2
 }
