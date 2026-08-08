@@ -79,13 +79,18 @@ tools/deploy.py --stop
 
 ### `control`
 
-- **`targetGridW`** — where you want grid power to sit. A small positive value
-  (~20 W) keeps you just barely importing, which is the safe side of zero
-  feed-in. `0` invites brief export on every load step.
+- **`targetGridW`** — where you want grid power to sit. `0` is correct when the
+  battery is solar-charged and export is uncompensated: importing and exporting
+  then cost exactly the same, so no bias is justified. A positive value is only
+  right if stored energy costs more than grid energy — e.g. a grid-charged
+  battery on a flat tariff, where round-trip losses make discharging to cover
+  baseload a net loss. See [docs/assumptions.md](docs/assumptions.md).
+- **`deadbandW`** — errors smaller than this are ignored. Read this together
+  with the target: a deadband of 15 around a target of 0 means the loop is
+  content anywhere in ±15 W, so **widening the band is equivalent to raising the
+  target**. Narrowing it costs more writes to the Zendure.
 - **`gain`** — how much of the error to correct per cycle. `1.0` is deadbeat and
   oscillates in practice; `0.8` settles in a couple of cycles.
-- **`deadbandW`** — errors smaller than this are ignored entirely, so household
-  noise doesn't cause constant setpoint churn.
 - **`maxStepW`** — cap on setpoint movement per cycle, so a kettle switching on
   doesn't slam the inverter from 0 to 800 W.
 - **`minWriteDeltaW`** — skip the POST when the new setpoint barely differs from
