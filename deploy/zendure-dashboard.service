@@ -1,0 +1,31 @@
+[Unit]
+Description=Zendure/Shelly dashboard
+Documentation=https://github.com/domo-sapiens/zendure-shelly-lightweight-automation
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zl
+WorkingDirectory=/home/zl/zendure-shelly-lightweight-automation
+ExecStart=/usr/bin/python3 /home/zl/zendure-shelly-lightweight-automation/tools/dashboard.py
+Restart=always
+RestartSec=10
+
+# Reads the collector's database; the collector owns it.
+StateDirectory=zendure-log
+
+# Deliberately a separate unit from the collector: a fault here must not be
+# able to interrupt data collection.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+MemoryMax=200M
+
+[Install]
+WantedBy=multi-user.target

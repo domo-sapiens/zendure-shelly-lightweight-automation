@@ -44,6 +44,16 @@
     "timeoutS": 5
   },
 
+  "economics": {
+    "importPriceEurPerKwh": 0.3159,
+    "_note": "changes to 0.3142 on 2026-09-03, with a lower monthly fixed rate"
+  },
+
+  "dashboard": {
+    "port": 8088,
+    "bindHost": "0.0.0.0"
+  },
+
   "collector": {
     "intervalS": 5,
     "timeoutS": 3,
