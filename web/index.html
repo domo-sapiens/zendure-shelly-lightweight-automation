@@ -400,7 +400,7 @@ async function refresh(full) {
       get("/api/latest"), get("/api/health"), get("/api/energy?hours=24")]);
     if (!l.ok) { $("#updated").textContent = "no samples yet"; return; }
 
-    $("#stale").classList.toggle("on", l.age_s > 30);
+    $("#stale").classList.toggle("on", l.age_s > (l.stale_after_s || 90));
     $("#updated").textContent =
       `updated ${new Date().toLocaleTimeString()} · last sample ${l.age_s}s ago · ` +
       `${(health.db_bytes / 1e6).toFixed(1)} MB`;

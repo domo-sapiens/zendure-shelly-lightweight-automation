@@ -85,6 +85,11 @@ class Api:
         d["deadband_w"] = self.cfg["control"]["deadbandW"]
         d["reserve_soc"] = self.cfg["battery"]["reserveSoc"]
         d["resume_soc"] = self.cfg["battery"]["resumeSoc"]
+        # The newest *committed* row lags by up to one commit batch, because the
+        # collector buffers to spare the SD card. A fixed threshold below that
+        # would flag healthy operation as stale forever.
+        c = self.cfg["collector"]
+        d["stale_after_s"] = c["commitEveryS"] + 3 * c["intervalS"]
         return d
 
     def series(self, minutes, since=None):

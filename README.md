@@ -24,6 +24,9 @@ Every `intervalMs`, the script on the Shelly:
 | `config/config.example.json` | Template, committed. |
 | `config/config.local.json` | **Your real values. Gitignored.** |
 | `tools/deploy.py` | Renders config into the script and uploads it over the Shelly RPC API. |
+| `tools/collector.py` | Polls both devices and stores a time series in SQLite. Runs on the Pi. |
+| `tools/dashboard.py` | Read-only web UI over that database. Separate process from the collector. |
+| `web/index.html` | The dashboard page. Charts hand-drawn on canvas, no dependencies. |
 | `tools/discover.sh` | Dumps both devices' state into `notes/` so you can read off the real values. |
 | `build/` | Generated script with config baked in. Gitignored. |
 | `notes/` | Device dumps. Contain serials/MACs, so `notes/*.json` is gitignored. |
@@ -117,6 +120,20 @@ tools/deploy.py --stop
 Defaults are 15 % / 20 %, which keeps the battery clear of 10 % with margin for
 SoC estimation drift. The Zendure's own `minSoc` (10 % out of the box) stays
 untouched underneath as an independent backstop.
+
+## Logging and dashboard
+
+A Raspberry Pi polls both devices independently and stores the series; see
+[docs/pi-setup.md](docs/pi-setup.md). The control loop is never in that data
+path, so the logger cannot disturb regulation.
+
+The dashboard shows grid power against the deadband, a tracking-error panel that
+separates *regulation error* from *saturation gap*, state of charge, and inverter
+efficiency binned by output power.
+
+Every tuning decision and the evidence behind it is in
+[docs/assumptions.md](docs/assumptions.md), which separates what was measured
+from what was merely assumed.
 
 ## Testing
 

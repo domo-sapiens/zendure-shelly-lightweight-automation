@@ -119,6 +119,23 @@ counts. Those failure counts are the measurement of the Shelly's weak Wi-Fi
 link — check them after a day before drawing conclusions about the control
 loop's reliability.
 
+## 5b. The dashboard
+
+```bash
+sudo cp deploy/zendure-dashboard.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now zendure-dashboard
+```
+
+Then browse to `http://zendure-log:8088/`.
+
+A separate unit from the collector on purpose: a fault in the web layer must not
+be able to interrupt data collection. It opens the database with
+`PRAGMA query_only`, so it cannot write even if it tried.
+
+**It is unauthenticated and has no access control.** Keep it on the LAN. For
+access from outside, use Raspberry Pi Connect or a VPN — never a port forward.
+
 ## 6. Check what has accumulated
 
 ```bash
