@@ -32,6 +32,19 @@ SAMPLE_COLUMNS = [
     "soc", "output_limit", "output_home_w",
     "pack_input_w", "solar_input_w", "grid_input_w",
     "ac_mode", "min_soc", "soc_set",
+    # DC side. pack_power_w is what the battery actually gives up, so
+    # pack_power_w vs output_home_w is inverter efficiency -- the measurement
+    # needed to test whether the app's 30W floor exists for efficiency reasons.
+    "pack_power_w", "bat_v", "bat_a", "pack_temp_c", "dev_temp_c",
+]
+
+# Columns added after the first deployment, applied to existing databases.
+MIGRATIONS = [
+    ("pack_power_w", "REAL"),
+    ("bat_v", "REAL"),
+    ("bat_a", "REAL"),
+    ("pack_temp_c", "REAL"),
+    ("dev_temp_c", "REAL"),
 ]
 
 SCHEMA = """
@@ -51,7 +64,12 @@ CREATE TABLE IF NOT EXISTS samples (
   grid_input_w  INTEGER,
   ac_mode       INTEGER,
   min_soc       INTEGER,
-  soc_set       INTEGER
+  soc_set       INTEGER,
+  pack_power_w  REAL,
+  bat_v         REAL,
+  bat_a         REAL,
+  pack_temp_c   REAL,
+  dev_temp_c    REAL
 );
 
 -- One-minute rollup. Raw rows expire; these are kept indefinitely.
@@ -68,7 +86,12 @@ CREATE TABLE IF NOT EXISTS samples_1m (
   output_home_w REAL,
   pack_input_w  REAL,
   solar_input_w REAL,
-  grid_input_w  REAL
+  grid_input_w  REAL,
+  pack_power_w  REAL,
+  bat_v         REAL,
+  bat_a         REAL,
+  pack_temp_c   REAL,
+  dev_temp_c    REAL
 );
 """
 
@@ -148,6 +171,17 @@ def poll_shelly(cfg):
     }
 
 
+def s16(v):
+    """batcur is an unsigned field carrying a signed int16.
+
+    Discharging reads as e.g. 65509, which is -27 (-2.7 A). Read naively it is
+    a nonsensical 6.5 kA, and any efficiency computed from it is garbage.
+    """
+    if v is None:
+        return None
+    return v - 65536 if v > 32767 else v
+
+
 def poll_zendure(cfg):
     host = cfg["zendure"]["host"]
     rep = fetch_json(
@@ -156,7 +190,7 @@ def poll_zendure(cfg):
     if not rep or "properties" not in rep:
         return None
     p = rep["properties"]
-    return {
+    out = {
         "soc": p.get("electricLevel"),
         "output_limit": p.get("outputLimit"),
         "output_home_w": p.get("outputHomePower"),
@@ -166,7 +200,22 @@ def poll_zendure(cfg):
         "ac_mode": p.get("acMode"),
         "min_soc": p.get("minSoc"),
         "soc_set": p.get("socSet"),
+        "dev_temp_c": p["hyperTmp"] / 100.0 if p.get("hyperTmp") else None,
+        "bat_v": p["BatVolt"] / 100.0 if p.get("BatVolt") else None,
     }
+
+    packs = rep.get("packData") or []
+    if packs:
+        pk = packs[0]
+        cur = s16(pk.get("batcur"))
+        out["pack_power_w"] = pk.get("power")
+        out["bat_a"] = cur / 10.0 if cur is not None else None
+        out["pack_temp_c"] = (
+            pk["maxTemp"] / 100.0 if pk.get("maxTemp") else None
+        )
+        if pk.get("totalVol"):
+            out["bat_v"] = pk["totalVol"] / 100.0
+    return out
 
 
 def sample(cfg):
@@ -203,6 +252,16 @@ def open_db(path):
     # after each expiry pass is silently a no-op and the file only ever grows.
     db.execute("PRAGMA auto_vacuum=INCREMENTAL")
     db.executescript(SCHEMA)
+    # Add columns introduced after a database was first created. ALTER TABLE
+    # ADD COLUMN backfills NULL, so existing rows survive with gaps rather than
+    # the history being thrown away.
+    for table in ("samples", "samples_1m"):
+        have = {r[1] for r in db.execute("PRAGMA table_info(%s)" % table)}
+        for name, sqltype in MIGRATIONS:
+            if name not in have:
+                db.execute("ALTER TABLE %s ADD COLUMN %s %s"
+                           % (table, name, sqltype))
+                log.info("migrated: added %s.%s", table, name)
     db.commit()
     return db
 
@@ -236,7 +295,9 @@ def maintain(db, retention_days):
                COUNT(*), SUM(shelly_ok), SUM(zendure_ok),
                AVG(grid_w), MIN(grid_w), MAX(grid_w),
                AVG(soc), AVG(output_limit), AVG(output_home_w),
-               AVG(pack_input_w), AVG(solar_input_w), AVG(grid_input_w)
+               AVG(pack_input_w), AVG(solar_input_w), AVG(grid_input_w),
+               AVG(pack_power_w), AVG(bat_v), AVG(bat_a),
+               AVG(pack_temp_c), AVG(dev_temp_c)
         FROM samples WHERE ts < ?
         GROUP BY (ts/60)*60
         """,
