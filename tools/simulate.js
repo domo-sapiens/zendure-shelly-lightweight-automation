@@ -148,20 +148,43 @@ check('stale callback did not release the in-flight cycle',
 
 // ---------------------------------------------------------------------------
 console.log('\n[7] Normal regulation still works');
-loadScript({ gridPower: 200, props: { ...baseProps, outputLimit: 100, outputHomePower: 100 } });
-deliver(); deliver();
-// error = 200-20 = 180; target = 100 + 0.8*180 = 244
-check('setpoint moves toward the target', env.writes.length === 1 && env.writes[0].properties.outputLimit === 244,
-      'got ' + (env.writes.length ? env.writes[0].properties.outputLimit : 'none'));
+// Expectations are derived from the deployed config, not hardcoded, so
+// retuning target/deadband/gain does not turn these into false failures.
+const cfg = loadScript({ gridPower: 0, props: { ...baseProps } }).CFG;
+const { targetGridW: TGT, deadbandW: DB, gain: G, maxStepW: STEP } = cfg.control;
+console.log(`      (config: target=${TGT}W deadband=${DB}W gain=${G} maxStep=${STEP}W)`);
 
-loadScript({ gridPower: 25, props: { ...baseProps } });
+// Just inside the deadband by construction, whatever the deadband is set to.
+loadScript({ gridPower: TGT + DB * 0.5, props: { ...baseProps } });
 deliver(); deliver();
-check('deadband suppresses the write', env.writes.length === 0);
+check('deadband suppresses the write', env.writes.length === 0,
+      'wrote ' + JSON.stringify(env.writes.map(w => w.properties.outputLimit)));
+
+// Comfortably outside it: the setpoint must move to absorb the excess import.
+const excess = Math.max(100, DB * 4);
+loadScript({ gridPower: TGT + excess, props: { ...baseProps, outputLimit: 100, outputHomePower: 100 } });
+deliver(); deliver();
+const wrote = env.writes.length === 1 ? env.writes[0].properties.outputLimit : null;
+const expected = Math.min(100 + Math.trunc(G * excess), 100 + STEP);
+check('setpoint absorbs the excess import', wrote !== null && Math.abs(wrote - expected) <= 1,
+      `expected ~${expected}, got ${wrote}`);
+check('and moves in the correct direction', wrote !== null && wrote > 100, 'got ' + wrote);
 
 loadScript({ gridPower: 5000, props: { ...baseProps, outputLimit: 0, outputHomePower: 0 } });
 deliver(); deliver();
-check('maxStepW caps the jump at 200W', env.writes.length === 1 && env.writes[0].properties.outputLimit === 200,
+check(`maxStepW caps the jump at ${STEP}W`,
+      env.writes.length === 1 && env.writes[0].properties.outputLimit === STEP,
       'got ' + (env.writes.length ? env.writes[0].properties.outputLimit : 'none'));
+
+// The dead zone measured on real hardware: 1-9W is commanded but delivers 0.
+// basis:"actual" must regulate from the real 0, not the phantom setpoint.
+console.log('\n[8] Sub-10W dead zone does not wind the setpoint up');
+loadScript({ gridPower: TGT + 20, props: { ...baseProps, outputLimit: 5, outputHomePower: 0 } });
+deliver(); deliver();
+const dz = env.writes.length ? env.writes[0].properties.outputLimit : null;
+check('regulates from delivered 0W, not the commanded 5W',
+      dz !== null && Math.abs(dz - Math.trunc(G * 20)) <= 1,
+      `expected ~${Math.trunc(G * 20)}, got ${dz}`);
 
 console.log(failures === 0 ? '\nALL PASS\n' : `\n${failures} FAILURE(S)\n`);
 process.exit(failures ? 1 : 0);

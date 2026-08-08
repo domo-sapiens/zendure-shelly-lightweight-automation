@@ -20,11 +20,11 @@
 
   "control": {
     "intervalMs": 5000,
-    "targetGridW": 20,
+    "targetGridW": 0,
     "gain": 0.8,
-    "deadbandW": 15,
+    "deadbandW": 5,
     "maxStepW": 200,
-    "minWriteDeltaW": 5,
+    "minWriteDeltaW": 3,
     "basis": "actual",
     "busyTimeoutCycles": 3,
     "healthEveryCycles": 120
