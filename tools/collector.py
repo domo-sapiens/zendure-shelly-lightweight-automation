@@ -14,6 +14,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import signal
 import sqlite3
 import sys
@@ -113,7 +114,7 @@ def load_config(path):
     c.setdefault("intervalS", 5)
     c.setdefault("timeoutS", 3)
     c.setdefault("commitEveryS", 60)
-    c.setdefault("rawRetentionDays", 14)
+    c.setdefault("rawRetentionDays", 365)
     c.setdefault("maintenanceEveryS", 3600)
     c.setdefault("healthEveryS", 600)
     c.setdefault("dbPath", os.path.join(ROOT, "data", "zendure.db"))
@@ -171,6 +172,52 @@ def poll_shelly(cfg):
     }
 
 
+def snake(name):
+    """CamelCase -> snake_case, safe as a SQL identifier.
+
+    SQLite identifiers are case-insensitive, so `BatVolt` and `batvolt` would
+    collide; normalising to one form avoids ever creating both.
+    """
+    s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)
+    s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", s)
+    return re.sub(r"[^A-Za-z0-9_]", "_", s).lower()
+
+
+def sql_type(v):
+    if isinstance(v, bool):
+        return "INTEGER"
+    if isinstance(v, int):
+        return "INTEGER"
+    if isinstance(v, float):
+        return "REAL"
+    return "TEXT"
+
+
+def capture_all(rep):
+    """Every scalar the device reports, under z_ (device) and zp_ (pack 0).
+
+    Deliberately indiscriminate. The device exposes ~60 scalars; storing the
+    lot costs a few hundred bytes a row and means a question asked in six
+    months is answerable from data already on disk, rather than needing a
+    schema change and then a six-month wait.
+
+    Only pack 0 is captured. With one pack installed that is everything; a
+    second pack would need a schema decision rather than silently averaging.
+    """
+    out = {}
+    for k, v in (rep.get("properties") or {}).items():
+        if isinstance(v, (dict, list)):
+            continue
+        out["z_" + snake(k)] = int(v) if isinstance(v, bool) else v
+    packs = rep.get("packData") or []
+    if packs:
+        for k, v in packs[0].items():
+            if isinstance(v, (dict, list)):
+                continue
+            out["zp_" + snake(k)] = int(v) if isinstance(v, bool) else v
+    return out
+
+
 def s16(v):
     """batcur is an unsigned field carrying a signed int16.
 
@@ -215,6 +262,8 @@ def poll_zendure(cfg):
         )
         if pk.get("totalVol"):
             out["bat_v"] = pk["totalVol"] / 100.0
+
+    out.update(capture_all(rep))
     return out
 
 
@@ -266,17 +315,49 @@ def open_db(path):
     return db
 
 
+MAX_COLUMNS = 200
+
+
+def ensure_columns(db, rows):
+    """Add columns for keys the schema has not seen yet.
+
+    Lets the device grow new fields across a firmware update without anyone
+    editing a schema; they simply start being recorded. Capped so a
+    misbehaving device cannot grow the table without bound.
+    """
+    have = {r[1].lower() for r in db.execute("PRAGMA table_info(samples)")}
+    wanted = {}
+    for r in rows:
+        for k, v in r.items():
+            if k.lower() not in have and v is not None:
+                wanted.setdefault(k, sql_type(v))
+    if not wanted:
+        return
+    if len(have) + len(wanted) > MAX_COLUMNS:
+        log.error("refusing to add %d columns: would exceed the %d cap",
+                  len(wanted), MAX_COLUMNS)
+        return
+    for name, typ in sorted(wanted.items()):
+        db.execute('ALTER TABLE samples ADD COLUMN "%s" %s' % (name, typ))
+    log.info("added %d columns: %s", len(wanted), ", ".join(sorted(wanted)))
+
+
 def flush(db, buffer):
     if not buffer:
         return 0
-    placeholders = ",".join("?" * len(SAMPLE_COLUMNS))
-    db.executemany(
-        "INSERT OR REPLACE INTO samples (%s) VALUES (%s)"
-        % (",".join(SAMPLE_COLUMNS), placeholders),
-        [tuple(r[c] for c in SAMPLE_COLUMNS) for r in buffer],
-    )
+    ensure_columns(db, buffer)
+    # Group by key set so a sample that lost a device (and therefore has fewer
+    # keys) does not force NULLs onto a batch that has them.
+    groups = {}
+    for r in buffer:
+        groups.setdefault(tuple(sorted(r)), []).append(r)
+    n = 0
+    for cols, rows in groups.items():
+        sql = "INSERT OR REPLACE INTO samples (%s) VALUES (%s)" % (
+            ",".join('"%s"' % c for c in cols), ",".join("?" * len(cols)))
+        db.executemany(sql, [tuple(r[c] for c in cols) for r in rows])
+        n += len(rows)
     db.commit()
-    n = len(buffer)
     buffer.clear()
     return n
 

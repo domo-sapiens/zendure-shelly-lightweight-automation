@@ -8,7 +8,7 @@
   :root {
     --bg:#12141a; --panel:#1a1d26; --line:#2a2f3c; --fg:#e6e9f0; --dim:#8b93a7;
     --grid:#e0574a; --limit:#4a9eda; --actual:#57c98a; --soc:#c9a227;
-    --warn:#e0a23c; --band:rgba(224,87,74,.10);
+    --solar:#f0b429; --warn:#e0a23c; --band:rgba(224,87,74,.10);
   }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--fg);
@@ -21,13 +21,14 @@
            font-weight:600; font-size:12px; display:none; }
   .stale.on { display:inline-block; }
 
-  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr));
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(125px,1fr));
           gap:1px; background:var(--line); border-bottom:1px solid var(--line); }
   .kpi { background:var(--panel); padding:12px 16px; }
   .kpi .label { color:var(--dim); font-size:11px; text-transform:uppercase;
                 letter-spacing:.06em; }
   .kpi .value { font-size:22px; font-variant-numeric:tabular-nums; margin-top:2px; }
   .kpi .sub { color:var(--dim); font-size:11px; font-variant-numeric:tabular-nums; }
+  .kpi.solar .value { color:var(--solar); }
 
   .controls { padding:12px 18px; display:flex; gap:8px; align-items:center;
               flex-wrap:wrap; border-bottom:1px solid var(--line); }
@@ -46,15 +47,30 @@
             color:var(--dim); margin-bottom:6px; }
   .legend i { display:inline-block; width:10px; height:2px; vertical-align:middle;
               margin-right:5px; }
-  canvas { width:100%; display:block; }
   .note { color:var(--dim); font-size:12px; margin:8px 0 4px; }
+
+  /* Two stacked canvases: the data layer redraws only when data changes, the
+     overlay redraws on every pointer move carrying just a line and dots. */
+  .chart { position:relative; touch-action:pan-y; }
+  .chart canvas { width:100%; display:block; }
+  .chart canvas.ovl { position:absolute; inset:0; pointer-events:none; }
+  .tip { position:absolute; pointer-events:none; opacity:0; transition:opacity .1s;
+         background:rgba(10,12,16,.96); border:1px solid var(--line);
+         border-radius:6px; padding:7px 10px; font-size:12px; white-space:nowrap;
+         font-variant-numeric:tabular-nums; z-index:5; }
+  .tip.on { opacity:1; }
+  .tip .t { color:var(--dim); margin-bottom:3px; }
+  .tip .r { display:flex; gap:8px; justify-content:space-between; }
+  .tip .r b { font-weight:600; }
+  .tip i { display:inline-block; width:8px; height:8px; border-radius:2px;
+           margin-right:6px; }
+
   table { border-collapse:collapse; width:100%; font-size:13px;
           font-variant-numeric:tabular-nums; }
   th,td { text-align:right; padding:5px 8px; border-bottom:1px solid var(--line); }
   th:first-child,td:first-child { text-align:left; }
   th { color:var(--dim); font-weight:500; font-size:11px; text-transform:uppercase;
        letter-spacing:.05em; }
-  .bar { background:var(--limit); height:9px; border-radius:2px; display:inline-block; }
 </style>
 </head>
 <body>
@@ -63,7 +79,7 @@
   <h1>Zendure zero-feed-in</h1>
   <span class="stale" id="stale">DATA STALE</span>
   <div class="spacer"></div>
-  <span class="sub" id="updated" style="color:var(--dim);font-size:12px"></span>
+  <span id="updated" style="color:var(--dim);font-size:12px"></span>
 </header>
 
 <div class="kpis" id="kpis"></div>
@@ -89,8 +105,15 @@
       <span><i style="background:var(--limit)"></i>outputLimit (commanded)</span>
       <span><i style="background:var(--actual)"></i>outputHomePower (delivered)</span>
     </div>
-    <canvas id="c-main" data-h="260"></canvas>
+    <div class="chart" id="ch-main"></div>
     <p class="note" id="note-main"></p>
+  </div>
+
+  <div class="card">
+    <h2>Solar input</h2>
+    <p class="desc">Combined across both MPPT inputs.</p>
+    <div class="legend"><span><i style="background:var(--solar)"></i>solar input</span></div>
+    <div class="chart" id="ch-solar"></div>
   </div>
 
   <div class="card">
@@ -105,7 +128,7 @@
       <span><i style="background:var(--grid)"></i>regulation error (grid − target)</span>
       <span><i style="background:var(--warn)"></i>saturation gap (commanded − delivered)</span>
     </div>
-    <canvas id="c-delta" data-h="200"></canvas>
+    <div class="chart" id="ch-delta"></div>
     <p class="note" id="note-delta"></p>
   </div>
 
@@ -114,7 +137,7 @@
     <p class="desc">Dashed lines are the reserve floor and the resume threshold.
        The gap between them stops the battery cycling at its floor.</p>
     <div class="legend"><span><i style="background:var(--soc)"></i>SoC %</span></div>
-    <canvas id="c-soc" data-h="160"></canvas>
+    <div class="chart" id="ch-soc"></div>
   </div>
 
   <div class="card">
@@ -132,27 +155,38 @@
 
 <script>
 const $ = s => document.querySelector(s);
-let windowMin = 60, paused = false, cache = null, effData = null;
+let windowMin = 60, paused = false, cache = null, effData = null, latest = null;
+const charts = {};   // id -> render state, kept for the hover readout
 
 const fmt = (v, d=0) => v === null || v === undefined || isNaN(v) ? "–" : v.toFixed(d);
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 
-// ---------------------------------------------------------------- charting
-// Hand-drawn on canvas: no library to vendor, download, or keep offline.
+// ---------------------------------------------------------------- chart core
+function makeChart(id, h) {
+  const host = $("#" + id);
+  host.innerHTML =
+    `<canvas class="data" data-h="${h}"></canvas><canvas class="ovl" data-h="${h}"></canvas>
+     <div class="tip"></div>`;
+  const st = { host, data: host.querySelector(".data"), ovl: host.querySelector(".ovl"),
+               tip: host.querySelector(".tip") };
+  charts[id] = st;
+  attachHover(id);
+  return st;
+}
+
 function setup(cv) {
   const dpr = window.devicePixelRatio || 1;
-  // Logical height comes from data-h, never from the height attribute:
-  // setting cv.height below rewrites that attribute, so reading it back
-  // would multiply the canvas by dpr on every single redraw.
+  // Logical height comes from data-h, never the height attribute: setting
+  // cv.height rewrites that attribute, so reading it back would multiply the
+  // canvas by dpr on every redraw.
   const w = cv.clientWidth, h = parseInt(cv.dataset.h);
-  cv.width = w * dpr; cv.height = h * dpr;
+  cv.width = Math.max(1, Math.round(w * dpr)); cv.height = Math.round(h * dpr);
   cv.style.height = h + "px";
   const g = cv.getContext("2d");
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, w, h);
   return { g, w, h };
 }
-
-function css(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
 
 function niceStep(range, want) {
   const raw = range / want, p = Math.pow(10, Math.floor(Math.log10(raw))), n = raw / p;
@@ -167,23 +201,25 @@ function timeLabel(ts, spanS) {
   if (spanS > 86400) return `${d.getDate()}. ${hh}:${mm}`;
   return `${hh}:${mm}`;
 }
+const stamp = ts => new Date(ts * 1000).toLocaleString(undefined,
+  { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
 
-// series: [{data:[...], color, width}], each aligned to ts[]
-function plot(cv, ts, series, opts = {}) {
-  const { g, w, h } = setup(cv);
+// series: [{label, data, color, width}]. opts.xmin/xmax force the time span so
+// an empty window still renders as that window rather than rescaling to data.
+function plot(id, ts, series, opts = {}) {
+  const st = charts[id];
+  const { g, w, h } = setup(st.data);
+  setup(st.ovl);
   const L = 52, R = 12, T = 10, B = 24;
   const pw = w - L - R, ph = h - T - B;
-  if (!ts.length) {
-    g.fillStyle = css("--dim"); g.font = "13px sans-serif";
-    g.fillText("no data in this window", L, T + ph / 2);
-    return;
-  }
+  // A hidden or background tab reports clientWidth 0, which makes pw negative
+  // and every derived coordinate nonsense. Bail out and let the visibility
+  // handler redraw once there is a real layout to draw into.
+  if (pw <= 0 || ph <= 0) { st.ts = null; return { clipped: 0 }; }
 
-  // Household loads are extremely peaky: a single kettle puts one 1200 W point
-  // in an hour whose median is 15 W, and full autoscaling then compresses
-  // everything that matters into one pixel. Robust mode scales to the 1st-99th
-  // percentile and clips the rest, reporting how many points were clipped so
-  // nothing is hidden silently.
+  const t0 = opts.xmin !== undefined ? opts.xmin : (ts.length ? ts[0] : 0);
+  const t1 = opts.xmax !== undefined ? opts.xmax : (ts.length ? ts[ts.length - 1] : 1);
+
   const all = [];
   let dataMin = Infinity, dataMax = -Infinity;
   for (const s of series) for (const v of s.data) {
@@ -192,39 +228,37 @@ function plot(cv, ts, series, opts = {}) {
     if (v < dataMin) dataMin = v;
     if (v > dataMax) dataMax = v;
   }
-  if (!all.length) {
-    g.fillStyle = css("--dim"); g.font = "13px sans-serif";
-    g.fillText("no data in this window", L, T + ph / 2);
-    return { clipped: 0 };
-  }
 
   let lo, hi;
-  if (opts.robust) {
+  if (!all.length) {                       // empty window: draw the frame anyway
+    lo = opts.min !== undefined ? opts.min : 0;
+    hi = opts.max !== undefined ? opts.max : 1;
+  } else if (opts.robust) {
+    // One kettle puts a 1200W point in an hour whose median is 15W; true
+    // autoscale would compress everything meaningful into a pixel.
     const sorted = all.slice().sort((a, b) => a - b);
     const q = p => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
     lo = q(0.01); hi = q(0.99);
   } else { lo = dataMin; hi = dataMax; }
-  if (opts.min !== undefined) lo = opts.min;
-  if (opts.max !== undefined) hi = opts.max;
+  if (opts.min !== undefined) lo = Math.min(lo, opts.min);
+  if (opts.max !== undefined) hi = Math.max(hi, opts.max);
   if (opts.includeZero) { lo = Math.min(lo, 0); hi = Math.max(hi, 0); }
-  // The deadband must always be visible, or the chart's whole point is lost.
   if (opts.band) { lo = Math.min(lo, opts.band[0]); hi = Math.max(hi, opts.band[1]); }
-  if (hi - lo < 1e-9) { hi = lo + 1; }
+  if (!isFinite(lo)) lo = 0;
+  if (!isFinite(hi)) hi = 1;
+  if (hi - lo < 1e-9) hi = lo + 1;
   const pad = (hi - lo) * 0.08; lo -= pad; hi += pad;
-  const clipped = all.reduce((n, v) => n + (v < lo || v > hi ? 1 : 0), 0);
 
-  const t0 = ts[0], t1 = ts[ts.length - 1];
   const X = t => L + (t1 === t0 ? pw / 2 : (t - t0) / (t1 - t0) * pw);
   const Y = v => T + ph - (v - lo) / (hi - lo) * ph;
+  Object.assign(st, { ts, series, X, Y, L, T, pw, ph, t0, t1, unit: opts.unit || "W" });
 
-  // horizontal band (target deadband)
   if (opts.band) {
     g.fillStyle = css("--band");
     const y1 = Y(opts.band[1]), y2 = Y(opts.band[0]);
     g.fillRect(L, y1, pw, y2 - y1);
   }
 
-  // y grid + labels
   const step = niceStep(hi - lo, 4);
   g.font = "11px sans-serif"; g.textAlign = "right"; g.textBaseline = "middle";
   for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) {
@@ -234,19 +268,16 @@ function plot(cv, ts, series, opts = {}) {
     g.fillStyle = css("--dim");
     g.fillText(Math.abs(v) < 1e-9 ? "0" : v.toFixed(step < 1 ? 1 : 0), L - 8, y);
   }
-  // emphasise zero
   if (lo < 0 && hi > 0) {
-    g.strokeStyle = css("--dim"); g.lineWidth = 1;
+    g.strokeStyle = css("--dim");
     g.beginPath(); g.moveTo(L, Y(0) + .5); g.lineTo(L + pw, Y(0) + .5); g.stroke();
   }
-  // dashed reference lines
   for (const ref of (opts.refs || [])) {
     g.save(); g.setLineDash([4, 4]); g.strokeStyle = ref.color || css("--dim");
     g.beginPath(); g.moveTo(L, Y(ref.v) + .5); g.lineTo(L + pw, Y(ref.v) + .5);
     g.stroke(); g.restore();
   }
 
-  // x labels
   g.textAlign = "center"; g.textBaseline = "top"; g.fillStyle = css("--dim");
   const nx = Math.max(2, Math.min(7, Math.floor(pw / 90)));
   for (let i = 0; i <= nx; i++) {
@@ -254,17 +285,15 @@ function plot(cv, ts, series, opts = {}) {
     g.fillText(timeLabel(t, t1 - t0), X(t), T + ph + 6);
   }
 
-  // series, breaking the line across nulls so gaps stay visible as gaps.
-  // Clipped to the plot rect so out-of-range excursions run along the edge
-  // instead of scribbling over the axis labels.
-  g.save();
-  g.beginPath(); g.rect(L, T, pw, ph); g.clip();
+  g.save(); g.beginPath(); g.rect(L, T, pw, ph); g.clip();
   for (const s of series) {
     g.strokeStyle = s.color; g.lineWidth = s.width || 1.5;
     g.lineJoin = "round"; g.beginPath();
     let pen = false;
     for (let i = 0; i < ts.length; i++) {
       const v = s.data[i];
+      // Break the line across nulls: a gap must look like a gap, never like a
+      // straight line drawn through missing time.
       if (v === null || v === undefined || isNaN(v)) { pen = false; continue; }
       const x = X(ts[i]), y = Y(v);
       if (!pen) { g.moveTo(x, y); pen = true; } else { g.lineTo(x, y); }
@@ -272,30 +301,109 @@ function plot(cv, ts, series, opts = {}) {
     g.stroke();
   }
   g.restore();
-  return { clipped, dataMin, dataMax };
+
+  if (!all.length) {
+    g.fillStyle = css("--dim"); g.font = "12px sans-serif";
+    g.textAlign = "center"; g.textBaseline = "middle";
+    g.fillText("no data in this window yet", L + pw / 2, T + ph / 2);
+  }
+  return { clipped: all.reduce((n, v) => n + (v < lo || v > hi ? 1 : 0), 0),
+           dataMin, dataMax };
+}
+
+// ---------------------------------------------------------------- hover
+// Snapping is by x only, so the pointer never has to be near the line itself.
+// Binary search is O(log n): ~12 comparisons over a day of raw samples, and it
+// all happens in the browser — the Pi never sees a pointer move.
+function nearestIndex(ts, t) {
+  if (!ts.length) return -1;
+  let lo = 0, hi = ts.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (ts[mid] < t) lo = mid; else hi = mid;
+  }
+  return (Math.abs(ts[lo] - t) <= Math.abs(ts[hi] - t)) ? lo : hi;
+}
+
+function attachHover(id) {
+  const st = charts[id];
+  const move = ev => {
+    if (!st.ts || !st.ts.length) return hideTip(id);
+    const rect = st.host.getBoundingClientRect();
+    const x = ev.clientX - rect.left;
+    if (x < st.L || x > st.L + st.pw) return hideTip(id);
+
+    const t = st.t0 + (x - st.L) / st.pw * (st.t1 - st.t0);
+    const i = nearestIndex(st.ts, t);
+    if (i < 0) return hideTip(id);
+    // Snapping by x is what makes this usable, but it must not reach across an
+    // empty stretch: hovering the blank part of a 24h window should read
+    // nothing, not a value from hours away.
+    const perPx = (st.t1 - st.t0) / st.pw;
+    if (Math.abs(st.ts[i] - t) > perPx * 40) return hideTip(id);
+
+    const { g, w } = setup(st.ovl);
+    const px = st.X(st.ts[i]);
+    g.strokeStyle = css("--dim"); g.lineWidth = 1; g.globalAlpha = .6;
+    g.beginPath(); g.moveTo(px + .5, st.T); g.lineTo(px + .5, st.T + st.ph); g.stroke();
+    g.globalAlpha = 1;
+
+    let rows = "";
+    for (const s of st.series) {
+      const v = s.data[i];
+      if (v === null || v === undefined || isNaN(v)) continue;
+      const py = st.Y(v);
+      if (py >= st.T && py <= st.T + st.ph) {
+        g.fillStyle = s.color;
+        g.beginPath(); g.arc(px, py, 3.5, 0, 6.284); g.fill();
+        g.strokeStyle = css("--panel"); g.lineWidth = 1.5; g.stroke();
+      }
+      rows += `<div class="r"><span><i style="background:${s.color}"></i>${s.label}</span>` +
+              `<b>${v.toFixed(Math.abs(v) < 10 ? 1 : 0)} ${st.unit}</b></div>`;
+    }
+    if (!rows) rows = `<div class="r"><span style="color:var(--dim)">no reading</span></div>`;
+
+    st.tip.innerHTML = `<div class="t">${stamp(st.ts[i])}</div>${rows}`;
+    st.tip.classList.add("on");
+    const tw = st.tip.offsetWidth;
+    st.tip.style.left = Math.max(4, Math.min(w - tw - 4, px + 14)) + "px";
+    st.tip.style.top = (st.T + 6) + "px";
+  };
+  st.host.addEventListener("pointermove", move);
+  st.host.addEventListener("pointerdown", move);
+  st.host.addEventListener("pointerleave", () => hideTip(id));
+}
+
+function hideTip(id) {
+  const st = charts[id];
+  st.tip.classList.remove("on");
+  const cv = st.ovl, dpr = window.devicePixelRatio || 1;
+  cv.getContext("2d").clearRect(0, 0, cv.width / dpr, cv.height / dpr);
 }
 
 // ---------------------------------------------------------------- rendering
-function renderKpis(l, energy, health) {
+function renderKpis(l, energy, health, solar) {
   const inBand = l.grid_w !== null &&
         Math.abs(l.grid_w - l.target_w) <= l.deadband_w;
   const k = [
     ["Grid now", `${fmt(l.grid_w, 1)} W`,
-     inBand ? "within deadband" : `target ${l.target_w} W ±${l.deadband_w}`],
+     inBand ? "within deadband" : `target ${l.target_w} W ±${l.deadband_w}`, ""],
+    ["Solar today", `${fmt(solar.kwh, 2)} kWh`,
+     `${solar.date} · peak ${fmt(solar.peak_w)} W`, "solar"],
     ["Battery out", `${fmt(l.output_home_w)} W`,
-     `commanded ${fmt(l.output_limit)} W`],
+     `commanded ${fmt(l.output_limit)} W`, ""],
     ["State of charge", `${fmt(l.soc)} %`,
-     `reserve ${l.reserve_soc}% / resume ${l.resume_soc}%`],
+     `reserve ${l.reserve_soc}% / resume ${l.resume_soc}%`, ""],
     ["Efficiency", l.efficiency ? `${fmt(l.efficiency, 1)} %` : "–",
-     l.pack_power_w ? `${fmt(l.pack_power_w)} W DC drawn` : "idle"],
+     l.pack_power_w ? `${fmt(l.pack_power_w)} W DC drawn` : "idle", ""],
     ["Imported 24 h", `${fmt(energy.import_kwh, 2)} kWh`,
-     `€${fmt(energy.import_cost_eur, 2)} at €${energy.price}/kWh`],
-    ["Exported 24 h", `${fmt(energy.export_kwh, 2)} kWh`, "earns nothing"],
+     `€${fmt(energy.import_cost_eur, 2)} at €${energy.price}/kWh`, ""],
+    ["Exported 24 h", `${fmt(energy.export_kwh, 2)} kWh`, "earns nothing", ""],
     ["Link 1 h", `${fmt(health.hour.zendure, 1)} %`,
-     `shelly ${fmt(health.hour.shelly, 1)} %`],
+     `shelly ${fmt(health.hour.shelly, 1)} %`, ""],
   ];
-  $("#kpis").innerHTML = k.map(([a, b, c]) =>
-    `<div class="kpi"><div class="label">${a}</div><div class="value">${b}</div>
+  $("#kpis").innerHTML = k.map(([a, b, c, cls]) =>
+    `<div class="kpi ${cls}"><div class="label">${a}</div><div class="value">${b}</div>
      <div class="sub">${c}</div></div>`).join("");
 }
 
@@ -308,24 +416,31 @@ function clipNote(el, r, unit) {
 
 function renderCharts(d, l) {
   const tgt = l.target_w, db = l.deadband_w;
-  clipNote($("#note-main"), plot($("#c-main"), d.ts, [
-    { data: d.grid_w, color: css("--grid"), width: 1.6 },
-    { data: d.output_limit, color: css("--limit") },
-    { data: d.output_home_w, color: css("--actual") },
-  ], { includeZero: true, robust: true, band: [tgt - db, tgt + db] }), "W");
+  const span = { xmin: d.from, xmax: d.to };
+
+  clipNote($("#note-main"), plot("ch-main", d.ts, [
+    { label: "grid", data: d.grid_w, color: css("--grid"), width: 1.6 },
+    { label: "commanded", data: d.output_limit, color: css("--limit") },
+    { label: "delivered", data: d.output_home_w, color: css("--actual") },
+  ], { ...span, includeZero: true, robust: true, band: [tgt - db, tgt + db] }), "W");
+
+  plot("ch-solar", d.ts, [
+    { label: "solar", data: d.solar_input_w, color: css("--solar"), width: 1.6 },
+  ], { ...span, includeZero: true, min: 0 });
 
   const err = d.grid_w.map(v => v === null ? null : v - tgt);
   const sat = d.output_limit.map((v, i) =>
     v === null || d.output_home_w[i] === null ? null : v - d.output_home_w[i]);
-  clipNote($("#note-delta"), plot($("#c-delta"), d.ts, [
-    { data: err, color: css("--grid"), width: 1.6 },
-    { data: sat, color: css("--warn") },
-  ], { includeZero: true, robust: true }), "W");
+  clipNote($("#note-delta"), plot("ch-delta", d.ts, [
+    { label: "regulation error", data: err, color: css("--grid"), width: 1.6 },
+    { label: "saturation gap", data: sat, color: css("--warn") },
+  ], { ...span, includeZero: true, robust: true }), "W");
 
-  plot($("#c-soc"), d.ts, [{ data: d.soc, color: css("--soc"), width: 1.8 }], {
-    refs: [{ v: l.reserve_soc, color: css("--grid") },
-           { v: l.resume_soc, color: css("--dim") }],
-  });
+  plot("ch-soc", d.ts, [
+    { label: "SoC", data: d.soc, color: css("--soc"), width: 1.8 },
+  ], { ...span, unit: "%",
+       refs: [{ v: l.reserve_soc, color: css("--grid") },
+              { v: l.resume_soc, color: css("--dim") }] });
 }
 
 function renderEfficiency(e) {
@@ -348,7 +463,6 @@ function renderEfficiency(e) {
     g.moveTo(L, y + .5); g.lineTo(L + pw, y + .5); g.stroke();
     g.fillStyle = css("--dim"); g.fillText(p + "%", L - 8, y);
   }
-  // the app's 30W floor, for comparison
   g.save(); g.setLineDash([4, 4]); g.strokeStyle = css("--warn");
   g.beginPath(); g.moveTo(X(30), T); g.lineTo(X(30), T + ph); g.stroke(); g.restore();
   g.fillStyle = css("--warn"); g.textAlign = "left"; g.textBaseline = "top";
@@ -359,7 +473,6 @@ function renderEfficiency(e) {
     const v = maxW * i / 5;
     g.fillText(Math.round(v) + " W", X(v), T + ph + 8);
   }
-  // p10-p90 spread, then the median line
   for (const b of e.bins) {
     g.strokeStyle = "rgba(74,158,218,.30)"; g.lineWidth = 6;
     g.beginPath(); g.moveTo(X(b.bin_w + 5), Y(Math.max(50, b.p10)));
@@ -383,6 +496,8 @@ function renderEfficiency(e) {
     verdict = d > 5
       ? `<tr><td colspan="5" style="color:var(--warn)">Below 30 W efficiency averages ${d.toFixed(1)} points lower — consistent with the app's floor being an efficiency limit.</td></tr>`
       : `<tr><td colspan="5" style="color:var(--actual)">No meaningful efficiency penalty below 30 W (${d.toFixed(1)} points) — the app's floor looks arbitrary.</td></tr>`;
+  } else if (!low.length) {
+    verdict = `<tr><td colspan="5" style="color:var(--dim)">No samples below 30 W yet, so the hypothesis is still untested.</td></tr>`;
   }
   $("#eff-table").innerHTML =
     `<tr><th>Output</th><th>Median eff.</th><th>p10–p90</th><th>Pack °C</th><th>Samples</th></tr>` +
@@ -392,19 +507,26 @@ function renderEfficiency(e) {
 }
 
 // ---------------------------------------------------------------- data flow
-async function get(url) { const r = await fetch(url); return r.json(); }
+async function get(url) {
+  const r = await fetch(url);
+  const j = await r.json();
+  if (j && j.error) throw new Error(j.error);
+  return j;
+}
 
 async function refresh(full) {
   try {
-    const [l, health, energy] = await Promise.all([
-      get("/api/latest"), get("/api/health"), get("/api/energy?hours=24")]);
+    const [l, health, energy, solar] = await Promise.all([
+      get("/api/latest"), get("/api/health"),
+      get("/api/energy?hours=24"), get("/api/solar")]);
+    latest = l;
     if (!l.ok) { $("#updated").textContent = "no samples yet"; return; }
 
     $("#stale").classList.toggle("on", l.age_s > (l.stale_after_s || 90));
     $("#updated").textContent =
       `updated ${new Date().toLocaleTimeString()} · last sample ${l.age_s}s ago · ` +
       `${(health.db_bytes / 1e6).toFixed(1)} MB`;
-    renderKpis(l, energy, health);
+    renderKpis(l, energy, health, solar);
 
     if (full || !cache) cache = await get(`/api/series?minutes=${windowMin}`);
     renderCharts(cache, l);
@@ -414,9 +536,12 @@ async function refresh(full) {
       renderEfficiency(effData);
     }
   } catch (e) {
-    $("#updated").textContent = "connection lost — " + e.message;
+    $("#updated").textContent = "error — " + e.message;
   }
 }
+
+["ch-main", "ch-solar", "ch-delta", "ch-soc"].forEach((id, i) =>
+  makeChart(id, [260, 180, 200, 160][i]));
 
 document.querySelectorAll("[data-min]").forEach(b => b.onclick = () => {
   document.querySelectorAll("[data-min]").forEach(x => x.classList.remove("on"));
@@ -430,7 +555,22 @@ $("#pause").onclick = e => {
   e.target.textContent = paused ? "Resume live" : "Pause live";
   e.target.classList.toggle("on", paused);
 };
-window.addEventListener("resize", () => { if (cache) refresh(false); });
+let rt;
+function redraw() {
+  if (cache && latest) {
+    renderCharts(cache, latest);
+    if (effData) renderEfficiency(effData);
+  }
+}
+window.addEventListener("resize", () => {
+  clearTimeout(rt);
+  rt = setTimeout(redraw, 150);
+});
+// Charts drawn while the tab was hidden have no usable geometry; redraw on
+// return rather than leaving a blank or broken canvas.
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) setTimeout(redraw, 50);
+});
 
 refresh(true);
 setInterval(() => { if (!paused) refresh(false); }, 5000);

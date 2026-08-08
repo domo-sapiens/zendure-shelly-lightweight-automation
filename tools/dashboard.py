@@ -94,17 +94,26 @@ class Api:
 
     def series(self, minutes, since=None):
         table = "samples" if minutes <= RAW_MAX_MINUTES else "samples_1m"
-        start = since if since else int(time.time()) - minutes * 60
-        cols = ",".join(SERIES_COLUMNS)
+        # The rollup names its health counters differently; selecting the raw
+        # table's names against it is what broke the 24h and 7d views.
+        ok_cols = ("shelly_ok,zendure_ok" if table == "samples"
+                   else "shelly_ok_n AS shelly_ok,zendure_ok_n AS zendure_ok")
+        now = int(time.time())
+        window_from = now - minutes * 60
+        start = since if since else window_from
+
         db = self._db()
         rows = db.execute(
-            "SELECT ts,shelly_ok,zendure_ok,%s FROM %s WHERE ts > ? ORDER BY ts"
-            % (cols, table),
+            "SELECT ts,%s,%s FROM %s WHERE ts > ? ORDER BY ts"
+            % (ok_cols, ",".join(SERIES_COLUMNS), table),
             (start,),
         ).fetchall()
         db.close()
 
-        out = {"table": table, "ts": []}
+        # The window is reported regardless of how much data exists in it, so
+        # the chart can span the range that was asked for and leave the empty
+        # part visibly empty instead of silently rescaling to the data.
+        out = {"table": table, "from": window_from, "to": now, "ts": []}
         for c in SERIES_COLUMNS:
             out[c] = []
         out["ok"] = []
@@ -112,12 +121,49 @@ class Api:
             out["ts"].append(r["ts"])
             # A failed poll is a real, visible gap: null so the chart breaks the
             # line rather than drawing straight through missing time.
-            zok = r["zendure_ok"] if table == "samples" else (r["zendure_ok_n"] or 0) > 0
-            sok = r["shelly_ok"] if table == "samples" else (r["shelly_ok_n"] or 0) > 0
-            out["ok"].append(1 if (zok and sok) else 0)
+            ok = (r["shelly_ok"] or 0) > 0 and (r["zendure_ok"] or 0) > 0
+            out["ok"].append(1 if ok else 0)
             for c in SERIES_COLUMNS:
                 out[c].append(r[c])
         return out
+
+    def solar(self):
+        """Solar energy harvested since local midnight.
+
+        Integrated from logged power rather than read from a device counter,
+        so it reflects exactly the period we have data for. Long gaps are not
+        integrated across: a missing hour is missing, not assumed constant.
+        """
+        now = time.time()
+        lt = time.localtime(now)
+        midnight = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday,
+                                0, 0, 0, 0, 0, -1))
+        db = self._db()
+        rows = db.execute(
+            """SELECT ts, solar_input_w FROM samples
+               WHERE ts >= ? AND zendure_ok=1 AND solar_input_w IS NOT NULL
+               ORDER BY ts""", (int(midnight),)
+        ).fetchall()
+        db.close()
+
+        wh = 0.0
+        peak = 0.0
+        prev = None
+        for r in rows:
+            v = r["solar_input_w"]
+            peak = max(peak, v)
+            if prev is not None:
+                dt = r["ts"] - prev
+                if 0 < dt <= 30:
+                    wh += v * dt / 3600.0
+            prev = r["ts"]
+        return {
+            "date": time.strftime("%d-%m-%y", lt),
+            "kwh": wh / 1000.0,
+            "peak_w": peak,
+            "since": int(midnight),
+            "samples": len(rows),
+        }
 
     def health(self):
         db = self._db()
@@ -279,6 +325,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(self.api.health())
             if u.path == "/api/energy":
                 return self._json(self.api.energy(num("hours", 24)))
+            if u.path == "/api/solar":
+                return self._json(self.api.solar())
             if u.path == "/api/efficiency":
                 return self._json(self.api.efficiency(num("hours", 168)))
             self._send(404, "not found", "text/plain")
