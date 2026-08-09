@@ -236,10 +236,16 @@ class Api:
     def efficiency(self, hours):
         """Inverter efficiency against output power, steady-state only.
 
-        Samples taken while the setpoint is moving compare an AC reading and a
-        DC reading from different moments, which produces meaningless outliers
-        (both >100% and absurdly low). Only intervals where outputLimit was
-        unchanged from the previous sample are used.
+        Two filters, both load-bearing:
+
+        - **Setpoint held still.** While it is moving, the AC and DC readings
+          come from different moments and the ratio is meaningless.
+        - **Solar must be zero.** `packData.power` is *net* pack power. With
+          solar charging the pack while the inverter discharges it, the DC
+          figure is offset by generation and the computed efficiency comes out
+          above 100% -- physically impossible, and exactly what the unfiltered
+          query produced (151% in the 70-79 W bin). Only periods with no
+          generation measure battery-to-AC conversion.
         """
         db = self._db()
         start = int(time.time()) - hours * 3600
@@ -252,6 +258,7 @@ class Api:
               FROM samples
               WHERE ts > ? AND zendure_ok=1
                 AND pack_power_w > 0 AND output_home_w > 0
+                AND (solar_input_w IS NULL OR solar_input_w = 0)
             )
             SELECT output_home_w w, pack_power_w dc, pack_temp_c t
             FROM s
@@ -279,7 +286,26 @@ class Api:
                 "p90": vals[int(n * 0.9)],
                 "temp": sum(temps) / len(temps) if temps else None,
             })
-        return {"hours": hours, "bins": out, "samples": len(rows)}
+
+        # Least squares on P_dc = a*P_ac + b. `b` is the fixed overhead drawn
+        # whenever the inverter converts, and it is the whole explanation for
+        # why efficiency collapses at low output -- far more informative than
+        # any single efficiency number.
+        fit = None
+        n = len(rows)
+        if n >= 30:
+            sx = sum(r["w"] for r in rows)
+            sy = sum(r["dc"] for r in rows)
+            sxx = sum(r["w"] ** 2 for r in rows)
+            sxy = sum(r["w"] * r["dc"] for r in rows)
+            denom = n * sxx - sx * sx
+            if denom:
+                a = (n * sxy - sx * sy) / denom
+                b0 = (sy - a * sx) / n
+                if a > 0:
+                    fit = {"slope": a, "overhead_w": b0,
+                           "marginal_eff": 100.0 / a}
+        return {"hours": hours, "bins": out, "samples": n, "fit": fit}
 
 
 class Handler(BaseHTTPRequestHandler):

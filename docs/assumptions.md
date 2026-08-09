@@ -73,13 +73,17 @@ still valid for judging *control* quality.
 | H5 | The device's own `minSoc` floor is **10 %** | measured | left untouched as an independent backstop |
 | H6 | `batcur` is an unsigned field carrying a **signed int16** | **measured** | discharging reads 65509, i.e. −27 → −2.7 A |
 | H7 | `packData.power` is DC power drawn from the pack, so **efficiency is directly measurable** as `outputHomePower ÷ packData.power` | **measured** | 49.40 V × 2.3 A = 113.6 W vs reported 113 W |
-| H8 | Inverter efficiency ≈ **89 %** at 101 W out | measured, single point | needs the full curve before it means anything |
+| H8 | Inverter loss model: **P_dc = 1.05 × P_ac + 22.4 W** — a fixed ~22 W overhead whenever converting, plus 95.3 % marginal efficiency | **MEASURED 2026-08-09** | least squares over 1 939 solar-free steady-state samples |
+| H9 | `packInputPower` **mirrors `outputHomePower` exactly** and is not a DC measurement | **measured** | differs in 0 of 1 939 samples; only `packData.power` is true DC |
 
 ### H1: the sub-30 W test
 
-Control loop stopped, values written directly, ~12 s settle each:
+Control loop stopped, values written directly, ~12 s settle each. Note the
+third column is `packInputPower`, which per H9 simply mirrors the AC output —
+it is **not** the DC draw, and this table therefore says nothing about
+efficiency. The real DC figure (`packData.power`) was only captured later:
 
-| commanded | delivered | pack input |
+| commanded | delivered | packInputPower |
 | --- | --- | --- |
 | 40 W | 40 W | 40 W |
 | 30 W | 30 W | 30 W |
@@ -187,8 +191,79 @@ accepting grid import for very small loads and reserving the battery for
 outputs where it is efficient. That would be a genuine change in strategy, not
 just a tuning tweak.
 
-**Status: not yet answerable.** Needs a stretch of steady-state operation at
-low output. The panel will populate on its own.
+**Status: CONFIRMED 2026-08-09.** The hypothesis was right.
+
+### The measurement
+
+1 939 steady-state samples with **solar at zero** (see the methodology note
+below) fit almost perfectly to a straight line:
+
+```
+P_dc = 1.0495 × P_ac + 22.41 W
+```
+
+That is a **fixed 22.4 W overhead whenever the inverter converts**, plus 95.3 %
+marginal efficiency on everything above it. Measured medians:
+
+| output | measured efficiency |
+| --- | --- |
+| 50–59 W | 66.7 % |
+| 60–69 W | 71.6 % |
+| 100–109 W | 85.2 % |
+| 200–229 W | ~86 % |
+| 790–809 W | ~93 % |
+
+Extrapolating the model into the region we have no samples for:
+
+| output | implied efficiency |
+| --- | --- |
+| 30 W | 56 % |
+| 20 W | 46 % |
+| 15 W | 39 % |
+| 10 W | 30 % |
+
+**The app's 30 W floor sits almost exactly where efficiency falls through
+~56 %.** That is very unlikely to be coincidence, and it makes the floor a
+sensible manufacturer default rather than an arbitrary restriction.
+
+### Methodology: why solar must be excluded
+
+`packData.power` is *net* pack power. When solar charges the pack while the
+inverter discharges it, the DC figure is offset by generation and the computed
+efficiency comes out **above 100 %** — physically impossible. The unfiltered
+query produced 151 % in the 70–79 W bin, which is what exposed the error.
+Only periods with zero generation measure battery-to-AC conversion. The
+dashboard endpoint now filters on this.
+
+### What it changes
+
+The consequence anticipated above is real, and larger than expected. Covering a
+25 W baseload does not cost 25 W of stored solar — it costs **~49 W**, because
+the 22.4 W overhead is paid the whole time. Just over half of what the battery
+gives up is burned by the inverter merely being on.
+
+This matters only while **stored energy is scarce**, which it currently is: SoC
+ran 100 % → 24 % in a day on ~0.36 kWh of generation (S5, panels badly sited).
+Under scarcity, a watt-hour of battery is worth far more spent at high output
+than at low:
+
+| output | avoided import per Wh of battery |
+| --- | --- |
+| 25 W | 0.51 Wh |
+| 100 W | 0.79 Wh |
+| 400 W | 0.91 Wh |
+
+**The option this opens** — not implemented, and it needs a decision:
+stop discharging below some output threshold and import instead, saving the
+overhead so the stored solar goes to high-load periods where it converts
+efficiently. The catch is that this is only correct while the battery is
+scarce. Once the panels are repositioned and the battery routinely fills and
+curtails, surplus solar is free and running at poor efficiency costs nothing —
+so any such rule should be conditioned on SoC, not applied unconditionally.
+
+**Deliberately not acted on yet.** The panels are temporarily badly sited (S5),
+so the current scarcity is not representative of the steady state. Revisit once
+generation is normal.
 
 ## 7. How to change any of this
 

@@ -51,8 +51,8 @@
 
   /* Two stacked canvases: the data layer redraws only when data changes, the
      overlay redraws on every pointer move carrying just a line and dots. */
+  canvas { width:100%; display:block; }
   .chart { position:relative; touch-action:pan-y; }
-  .chart canvas { width:100%; display:block; }
   .chart canvas.ovl { position:absolute; inset:0; pointer-events:none; }
   .tip { position:absolute; pointer-events:none; opacity:0; transition:opacity .1s;
          background:rgba(10,12,16,.96); border:1px solid var(--line);
@@ -485,8 +485,35 @@ function renderEfficiency(e) {
   });
   g.stroke();
 
-  $("#eff-note").textContent =
-    `${e.samples} steady-state samples over ${e.hours} h. Wide spread in a bin means few samples, not real variance.`;
+  if (e.fit) {
+    // P_dc = slope*P_ac + overhead  =>  eff(P) = P / (slope*P + overhead)
+    const eff = p => 100 * p / (e.fit.slope * p + e.fit.overhead_w);
+    const measuredFrom = e.bins.length ? e.bins[0].bin_w : 0;
+    g.save(); g.strokeStyle = css("--warn"); g.lineWidth = 1.5;
+    g.setLineDash([5, 4]); g.beginPath();
+    let started = false;
+    for (let p = 5; p <= maxW; p += 2) {
+      const y = Y(Math.max(50, Math.min(100, eff(p))));
+      const x = X(p);
+      if (!started) { g.moveTo(x, y); started = true; } else g.lineTo(x, y);
+    }
+    g.stroke(); g.restore();
+    g.fillStyle = css("--warn"); g.textAlign = "left"; g.textBaseline = "bottom";
+    g.font = "11px sans-serif";
+    g.fillText(`model: ${e.fit.overhead_w.toFixed(1)} W overhead + ` +
+               `${e.fit.marginal_eff.toFixed(1)}% marginal`, X(measuredFrom) + 6, T + ph - 6);
+  }
+
+  let note = `${e.samples} steady-state samples over ${e.hours} h, solar-free periods only ` +
+             `(with solar charging the pack, DC is net and the ratio exceeds 100%).`;
+  if (e.fit) {
+    const at = p => (100 * p / (e.fit.slope * p + e.fit.overhead_w)).toFixed(0);
+    note += ` Fitted: the inverter draws a fixed ${e.fit.overhead_w.toFixed(1)} W whenever it ` +
+            `converts, plus ${e.fit.marginal_eff.toFixed(1)}% marginal efficiency. ` +
+            `That implies ${at(10)}% at 10 W, ${at(20)}% at 20 W and ${at(30)}% at 30 W — ` +
+            `the dashed line is the model, extrapolated below the measured range.`;
+  }
+  $("#eff-note").textContent = note;
   const low = e.bins.filter(b => b.bin_w < 30), high = e.bins.filter(b => b.bin_w >= 30);
   const avg = a => a.length ? a.reduce((s, b) => s + b.median, 0) / a.length : null;
   const lo = avg(low), hi = avg(high);
@@ -496,6 +523,11 @@ function renderEfficiency(e) {
     verdict = d > 5
       ? `<tr><td colspan="5" style="color:var(--warn)">Below 30 W efficiency averages ${d.toFixed(1)} points lower — consistent with the app's floor being an efficiency limit.</td></tr>`
       : `<tr><td colspan="5" style="color:var(--actual)">No meaningful efficiency penalty below 30 W (${d.toFixed(1)} points) — the app's floor looks arbitrary.</td></tr>`;
+  } else if (!low.length && e.fit) {
+    const at30 = 100 * 30 / (e.fit.slope * 30 + e.fit.overhead_w);
+    verdict = `<tr><td colspan="5" style="color:var(--warn)">No measured samples below 30 W, but the fitted ` +
+      `${e.fit.overhead_w.toFixed(1)} W fixed overhead implies only ${at30.toFixed(0)}% efficiency at 30 W ` +
+      `and worse below — consistent with the app's floor being an efficiency limit.</td></tr>`;
   } else if (!low.length) {
     verdict = `<tr><td colspan="5" style="color:var(--dim)">No samples below 30 W yet, so the hypothesis is still untested.</td></tr>`;
   }
