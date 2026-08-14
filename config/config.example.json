@@ -30,6 +30,18 @@
     "healthEveryCycles": 120
   },
 
+  "inverter": {
+    "overheadW": 22.4,
+    "slope": 1.05,
+    "_note": "measured 2026-08-13: P_dc = 1.05*P_ac + 22.4W over 2006 solar-free steady-state samples"
+  },
+
+  "solar": {
+    "passthroughWhenBlocked": true,
+    "derate": 0.90,
+    "marginW": 10
+  },
+
   "battery": {
     "reserveSoc": 15,
     "resumeSoc": 20,

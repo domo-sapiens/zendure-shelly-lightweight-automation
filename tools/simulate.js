@@ -66,7 +66,7 @@ function check(name, cond, detail) {
 
 const baseProps = {
   electricLevel: 50, minSoc: 100, socSet: 1000, acMode: 2,
-  inputLimit: 0, outputLimit: 100, outputHomePower: 100,
+  inputLimit: 0, outputLimit: 100, outputHomePower: 100, solarInputPower: 0,
 };
 
 // ---------------------------------------------------------------------------
@@ -112,6 +112,78 @@ env.props.electricLevel = 20; env.props.outputLimit = 0; env.writes.length = 0;
 env.timerFn(); deliver(); deliver();
 check('resumes at resumeSoc (20%)', env.writes.length === 1 && env.writes[0].properties.outputLimit > 0,
       'writes=' + JSON.stringify(env.writes.map(w => w.properties.outputLimit)));
+
+// ---------------------------------------------------------------------------
+console.log('\n[4b] Below reserve, solar is passed through instead of blocked');
+// The real fault observed on 2026-08-13: SoC 18% (blocked), 160W of solar
+// arriving, output forced to 0, house importing 145W from the grid while all
+// that free solar was pushed into the battery.
+// The gate latches at <=15% and releases at >=20%, so it must be driven below
+// the reserve first; starting fresh at 18% is simply not blocked yet.
+loadScript({ gridPower: 145, props: { ...baseProps, electricLevel: 14,
+             outputLimit: 0, outputHomePower: 0, solarInputPower: 0 } });
+deliver(); deliver();
+env.props.electricLevel = 18;          // recovering, still latched
+env.props.solarInputPower = 160;       // sun comes out
+env.writes.length = 0;
+env.timerFn(); deliver(); deliver();
+const passed = env.writes.length ? env.writes[0].properties.outputLimit : 0;
+check('solar is delivered to the house while below reserve', passed > 0,
+      'commanded ' + passed + 'W');
+// (160*0.90 - 22.4)/1.05 - 10 = 105
+check('capped to what solar alone supports', passed <= 106,
+      'commanded ' + passed + 'W, cap should be ~105W');
+
+console.log('\n[4c] Passthrough must never drain the battery');
+// No solar: the gate must still force output to 0, exactly as before.
+loadScript({ gridPower: 500, props: { ...baseProps, electricLevel: 14,
+             outputLimit: 300, outputHomePower: 300, solarInputPower: 0 } });
+deliver(); deliver();
+check('no solar => still blocked to 0W',
+      env.writes.length === 1 && env.writes[0].properties.outputLimit === 0,
+      'wrote ' + JSON.stringify(env.writes.map(w => w.properties.outputLimit)));
+
+// Heavy load must not let the loop pull past the solar cap.
+loadScript({ gridPower: 2000, props: { ...baseProps, electricLevel: 14,
+             outputLimit: 0, outputHomePower: 0, solarInputPower: 200 } });
+deliver(); deliver();
+const heavy = env.writes.length ? env.writes[0].properties.outputLimit : 0;
+check('heavy load cannot exceed the solar cap', heavy > 0 && heavy <= 143,
+      'commanded ' + heavy + 'W under 2000W load');
+
+// Solar fading must pull the setpoint down even while grid sits on target,
+// which is the path the deadband early-return used to skip.
+loadScript({ gridPower: 0, props: { ...baseProps, electricLevel: 14,
+             outputLimit: 105, outputHomePower: 105, solarInputPower: 40 } });
+deliver(); deliver();
+const faded = env.writes.length ? env.writes[0].properties.outputLimit : null;
+check('fading solar lowers the setpoint from inside the deadband',
+      faded !== null && faded < 105, 'wrote ' + faded);
+
+console.log('\n[4e] Restart between reserve and resume stays blocked');
+// Observed for real: redeploying at 18% SoC cleared the latch, and the battery
+// silently resumed discharging below the level it was being protected at.
+loadScript({ gridPower: 400, props: { ...baseProps, electricLevel: 18,
+             outputLimit: 0, outputHomePower: 0, solarInputPower: 0 } });
+deliver(); deliver();
+check('fresh start at 18% (below resume) does not discharge',
+      env.writes.length === 0 || env.writes[0].properties.outputLimit === 0,
+      'wrote ' + JSON.stringify(env.writes.map(w => w.properties.outputLimit)));
+
+loadScript({ gridPower: 400, props: { ...baseProps, electricLevel: 25,
+             outputLimit: 0, outputHomePower: 0, solarInputPower: 0 } });
+deliver(); deliver();
+check('fresh start at 25% (above resume) discharges normally',
+      env.writes.length === 1 && env.writes[0].properties.outputLimit > 0,
+      'wrote ' + JSON.stringify(env.writes.map(w => w.properties.outputLimit)));
+
+console.log('\n[4d] Above reserve, nothing changes');
+loadScript({ gridPower: 300, props: { ...baseProps, electricLevel: 60,
+             outputLimit: 100, outputHomePower: 100, solarInputPower: 50 } });
+deliver(); deliver();
+const normal = env.writes.length ? env.writes[0].properties.outputLimit : null;
+check('healthy SoC is not capped by solar', normal !== null && normal > 150,
+      'wrote ' + normal + 'W (solar was only 50W)');
 
 // ---------------------------------------------------------------------------
 console.log('\n[5] Watchdog recovers from a callback that never fires');

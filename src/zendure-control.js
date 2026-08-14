@@ -19,7 +19,9 @@ var state = {
   busy: false,
   busySince: 0,
 
-  dischargeBlocked: false,
+  // null until the first reading: the latch cannot be recovered across a
+  // restart, so it is re-derived from SoC rather than assumed open.
+  dischargeBlocked: null,
 
   pollErrors: 0,
   writeErrors: 0,
@@ -84,6 +86,17 @@ function readGridPower() {
 function updateDischargeGate(props) {
   var soc = props.electricLevel;
 
+  if (state.dischargeBlocked === null) {
+    // First reading after a start, redeploy or reboot: the latch was lost with
+    // the previous process. Between reserveSoc and resumeSoc the correct state
+    // is ambiguous from SoC alone, so assume blocked -- otherwise a restart at
+    // 18% silently resumes draining a battery that was deliberately being held.
+    state.dischargeBlocked = soc < CFG.battery.resumeSoc;
+    log(1, "reserve: starting at " + soc + "%, discharge " +
+           (state.dischargeBlocked ? "blocked until " + CFG.battery.resumeSoc + "%"
+                                   : "allowed"));
+  }
+
   if (state.dischargeBlocked) {
     if (soc >= CFG.battery.resumeSoc) {
       state.dischargeBlocked = false;
@@ -99,6 +112,30 @@ function updateDischargeGate(props) {
   return state.dischargeBlocked;
 }
 
+// How much AC output the current solar input can support on its own.
+//
+// The reserve gate exists to stop the *battery* being drained. Solar arriving
+// right now was never in the battery, so serving the house from it costs the
+// reserve nothing -- while blocking it forces a grid import and pushes that
+// solar through a charge/discharge round trip instead. Measured, that round
+// trip turns 160 W of solar into 103 W of AC later, against 131 W if used
+// directly: 27 % of the energy thrown away for nothing.
+//
+// Converted through the measured loss model (H8) and then derated, because
+// solarInputPower is measured on the PV side and some of it is lost reaching
+// the inverter. Erring low means the battery keeps charging slightly rather
+// than quietly discharging below its reserve.
+function solarPassthroughCap(props) {
+  if (!CFG.solar.passthroughWhenBlocked) return 0;
+  var dc = props.solarInputPower;
+  if (typeof dc === "undefined" || dc === null || dc <= 0) return 0;
+
+  var usable = dc * CFG.solar.derate - CFG.inverter.overheadW;
+  if (usable <= 0) return 0;
+  var cap = ~~(usable / CFG.inverter.slope - CFG.solar.marginW);
+  return cap > 0 ? cap : 0;
+}
+
 // The value we regulate *from*. "actual" tracks what the battery really pushes
 // out (outputHomePower), which stops the setpoint from winding up when the
 // battery cannot reach its limit. "limit" reproduces the original forum script.
@@ -108,15 +145,17 @@ function controlBasis(props) {
   return props.outputHomePower;
 }
 
-function computeSetpoint(props, grid, blocked) {
-  // Checked before the deadband, so a reserve breach cannot be skipped over by
-  // a cycle that happens to land inside the deadband.
-  if (blocked) return 0;
+function computeSetpoint(props, grid, blocked, ceiling) {
+  // The ceiling is resolved before the deadband, so a reserve breach cannot be
+  // skipped over by a cycle that happens to land inside the deadband.
+  if (ceiling <= 0) return 0;
 
   var error = grid - CFG.control.targetGridW;
 
   if (error > -CFG.control.deadbandW && error < CFG.control.deadbandW) {
-    return props.outputLimit; // inside deadband: hold current setpoint
+    // Inside the deadband: hold, but never above the ceiling. Solar falling
+    // away must still pull the setpoint down even when grid power is on target.
+    return clamp(props.outputLimit, CFG.zendure.minOutputW, ceiling);
   }
 
   var target = controlBasis(props) + CFG.control.gain * error;
@@ -126,7 +165,7 @@ function computeSetpoint(props, grid, blocked) {
   if (delta > CFG.control.maxStepW) target = props.outputLimit + CFG.control.maxStepW;
   if (delta < -CFG.control.maxStepW) target = props.outputLimit - CFG.control.maxStepW;
 
-  return clamp(~~target, CFG.zendure.minOutputW, CFG.zendure.maxOutputW);
+  return clamp(~~target, CFG.zendure.minOutputW, ceiling);
 }
 
 // Optional charge/discharge hysteresis by moving minSoc on the device. Disabled
@@ -261,21 +300,25 @@ function tick() {
       }
 
       var blocked = updateDischargeGate(props);
+      // Below the reserve the battery must not be drained, but solar arriving
+      // now can still be passed straight to the house.
+      var ceiling = blocked ? solarPassthroughCap(props) : CFG.zendure.maxOutputW;
 
       log(3, "soc=" + props.electricLevel + "% minSoc=" + props.minSoc / 10 +
              "% socSet=" + props.socSet / 10 + "% acMode=" + props.acMode +
              " inputLimit=" + props.inputLimit + "W");
       log(2, "grid=" + grid + "W outputLimit=" + props.outputLimit +
              "W outputHomePower=" + props.outputHomePower + "W soc=" +
-             props.electricLevel + "%" + (blocked ? " [reserve]" : ""));
+             props.electricLevel + "% solar=" + props.solarInputPower + "W" +
+             (blocked ? " [reserve, solarCap=" + ceiling + "W]" : ""));
 
-      var setpoint = computeSetpoint(props, grid, blocked);
+      var setpoint = computeSetpoint(props, grid, blocked, ceiling);
       var minSoc = computeMinSoc(props);
 
-      // A reserve breach always writes, however small the change: the
-      // minWriteDelta economy must not leave the battery discharging at a
-      // trickle below the reserve.
-      var mustWrite = blocked && props.outputLimit !== 0;
+      // Anything that lowers the setpoint while blocked must be written
+      // immediately, however small: the minWriteDelta economy must not leave
+      // the battery trickling out below its reserve when solar fades.
+      var mustWrite = blocked && setpoint < props.outputLimit;
       var change = abs(setpoint - props.outputLimit);
 
       if (!mustWrite && change < CFG.control.minWriteDeltaW && minSoc === null) {

@@ -117,6 +117,8 @@ does not.
 | C6 | `intervalMs` | 5000 | **ASSUMED.** Inherited from the forum script. Transient response is bounded by this — a load step is uncorrected for up to 5 s. |
 | C7 | `basis` | `"actual"` | Regulating from `outputHomePower` rather than `outputLimit` stops the setpoint winding up when the battery cannot comply. |
 | C8 | `reserveSoc` / `resumeSoc` | 15 % / 20 % | Owner asked never to discharge to ≤10 %. The gap prevents chatter at the floor. |
+| C9 | `solar.passthroughWhenBlocked` | `true` | Below the reserve, output is capped at what solar alone supports instead of forced to 0. See §7. |
+| C10 | `solar.derate` / `solar.marginW` | 0.90 / 10 W | `solarInputPower` is measured PV-side; the cap errs low so the battery holds steady rather than quietly draining. Calibrated live: 144 W solar → 92 W AC with battery current at exactly 0.0 A. |
 
 **C4, C5 and C6 are the untuned ones.** They were inherited or guessed, and
 they are what the collected data is for. Do not treat them as considered
@@ -276,3 +278,53 @@ python3 tools/deploy.py
 Nothing in `src/zendure-control.js` needs editing to retune — every value in
 section 4 is configuration. Update this document when a value changes, and move
 rows from *assumed* to *measured* as evidence arrives.
+
+
+## 7. Solar passthrough below the reserve
+
+**The fault (observed 2026-08-13).** With SoC at 18 % the reserve gate was
+latched, forcing `outputLimit` to 0. Meanwhile 160 W of solar was arriving and
+the house was importing 145 W from the grid — every watt of free solar was being
+pushed into the battery while the grid paid for the house.
+
+Over the logged period this was not marginal:
+
+- **71 %** of all solar-generating time (34.5 h of 48.5 h) had output blocked
+- **5.42 kWh imported (€1.71)** while solar was available
+- **1.67 kWh of solar** diverted into the battery instead of the house
+
+**Why it was wrong.** The reserve exists to stop the *battery* being drained.
+Solar arriving now was never in the battery, so serving the house from it costs
+the reserve nothing. Blocking it forces an import *and* pushes that solar
+through a charge/discharge round trip. Measured against H8, 160 W of solar used
+directly yields 131 W of AC; stored and later discharged it yields 103 W — a
+**27 % loss for no benefit**.
+
+**The fix.** While blocked, the setpoint is capped at what solar alone can
+support rather than forced to zero:
+
+```
+cap_ac = (solarInputPower × derate − overheadW) / slope − marginW
+```
+
+With no solar the cap is 0 and behaviour is identical to before. The cap is
+applied *before* the deadband, so fading solar still pulls the setpoint down
+even when grid power is already on target.
+
+**Verified live 2026-08-14.** 144 W solar → 92 W commanded and delivered, with
+battery current at exactly **0.0 A** — the derate and margin land almost
+precisely on break-even. Grid import fell from 135 W to ~43 W.
+
+**A second bug this exposed.** Redeploying at 18 % SoC cleared the latch:
+`dischargeBlocked` reset to `false`, 18 % is above the 15 % trigger, and the
+battery silently resumed discharging below the level it was being protected at.
+Any Shelly reboot would have done the same. The latch is now re-derived at
+startup — blocked whenever SoC is below `resumeSoc`, since between the two
+thresholds the correct state cannot be recovered from SoC alone.
+
+**Note on recovery, which is intended and not a deadlock.** While blocked and
+consuming all available solar, the battery does not charge, so SoC does not
+climb toward `resumeSoc`. That is correct: it only refuses to recharge by
+starving the house. Whenever solar genuinely exceeds household load the loop
+settles at grid ≈ 0 and the surplus charges the battery as normal — the battery
+fills from real surplus, never from energy the house needed anyway.
