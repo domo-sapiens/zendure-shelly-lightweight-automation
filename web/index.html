@@ -9,6 +9,10 @@
     --bg:#12141a; --panel:#1a1d26; --line:#2a2f3c; --fg:#e6e9f0; --dim:#8b93a7;
     --grid:#e0574a; --limit:#4a9eda; --actual:#57c98a; --soc:#c9a227;
     --solar:#f0b429; --warn:#e0a23c; --band:rgba(224,87,74,.10);
+    /* Used by the flow diagram. An undefined var() in an SVG presentation
+       attribute silently computes to `none`, so a missing name here draws
+       nothing at all rather than erroring. */
+    --home:#4a9eda; --batt:#57c98a; --loss:#6b7280;
   }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--fg);
@@ -67,6 +71,16 @@
   .tip i { display:inline-block; width:8px; height:8px; border-radius:2px;
            margin-right:6px; }
 
+  .flowcard { margin:18px 18px 0; }
+  #flow { max-width:720px; margin:0 auto; }
+  #flow .box { fill:#20242e; stroke:var(--line); }
+  #flow text { font-size:11px; fill:var(--dim); }
+  #flow text.k { font:600 13px ui-monospace,SFMono-Regular,Menlo,monospace; }
+  /* Dots drift at a constant, unhurried speed: the animation says "direction",
+     the stroke width says "how much". Varying speed too would be noise. */
+  #flow .dot { r:2.6; opacity:.9; }
+  @media (prefers-reduced-motion: reduce) { #flow .dot { display:none; } }
+
   table { border-collapse:collapse; width:100%; font-size:13px;
           font-variant-numeric:tabular-nums; }
   th,td { text-align:right; padding:5px 8px; border-bottom:1px solid var(--line); }
@@ -85,6 +99,14 @@
 </header>
 
 <div class="kpis" id="kpis"></div>
+
+<div class="card flowcard">
+  <h2>Energy flow</h2>
+  <p class="desc">Live. Line thickness scales with power; a flow reading zero is a
+     faint dashed stub. Losses are shown explicitly — most of it is the fixed
+     ~22 W the inverter draws simply to be running.</p>
+  <div id="flowhost"></div>
+</div>
 
 <div class="controls">
   <span style="color:var(--dim);font-size:12px">Window</span>
@@ -407,6 +429,8 @@ function renderKpis(l, energy, health, solar) {
     ["Imported 24 h", `${fmt(energy.import_kwh, 2)} kWh`,
      `€${fmt(energy.import_cost_eur, 2)} at €${energy.price}/kWh`, ""],
     ["Exported 24 h", `${fmt(energy.export_kwh, 2)} kWh`, "earns nothing", ""],
+    ["Conversion losses", `${fmt(l.losses_w)} W`,
+     "incl. ~22 W inverter overhead", ""],
     ["Link 1 h", `${fmt(health.hour.zendure, 1)} %`,
      `shelly ${fmt(health.hour.shelly, 1)} %`, ""],
   ];
@@ -546,6 +570,149 @@ function renderEfficiency(e) {
       <td>${b.temp === null ? "–" : b.temp.toFixed(1)}</td><td>${b.n}</td></tr>`).join("") + verdict;
 }
 
+// ---------------------------------------------------------------- flow diagram
+// Built once, then only its numbers and stroke widths are updated. Rebuilding
+// the markup on every 5 s refresh would restart every animation and make the
+// whole thing twitch.
+const FLOW = {
+  pv:   { x:20,  y:14,  w:112, h:62 },
+  batt: { x:20,  y:240, w:112, h:62 },
+  inv:  { x:192, y:132, w:96,  h:58 },
+  home: { x:348, y:14,  w:112, h:62 },
+  grid: { x:348, y:240, w:112, h:62 },
+};
+const PATHS = {
+  pv:    "M 132 45 H 162 V 150 H 192",
+  battO: "M 192 175 H 162 V 271 H 132",     // inverter -> battery (charging)
+  battI: "M 132 271 H 162 V 175 H 192",     // battery -> inverter (discharging)
+  out:   "M 288 155 H 318 V 45 H 348",
+  gridI: "M 404 240 V 76",                  // grid -> home (importing)
+  gridE: "M 404 76 V 240",                  // home -> grid (exporting)
+  loss:  "M 240 190 V 244",
+};
+
+function dots(id, d, color, n) {
+  let out = "";
+  for (let i = 0; i < n; i++) {
+    out += `<circle class="dot" fill="${color}" r="2.6">
+      <animateMotion dur="3.2s" repeatCount="indefinite" begin="-${(3.2 / n) * i}s"
+                     path="${d}"/></circle>`;
+  }
+  return `<g id="${id}" style="display:none">${out}</g>`;
+}
+
+function flowBox(id, b, color, icon, name) {
+  return `
+    <rect class="box" x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" rx="7"/>
+    <rect x="${b.x}" y="${b.y}" width="3.5" height="${b.h}" rx="2" fill="${color}"/>
+    <text x="${b.x + 13}" y="${b.y + 19}" font-size="13">${icon}</text>
+    <text x="${b.x + 32}" y="${b.y + 19}">${name}</text>
+    <text class="k" id="${id}-v" x="${b.x + 13}" y="${b.y + 40}" fill="${color}">–</text>
+    <text id="${id}-s" x="${b.x + 13}" y="${b.y + 55}"></text>`;
+}
+
+function buildFlow() {
+  const line = (id, d, color) =>
+    `<path id="${id}" d="${d}" fill="none" stroke="${color}" stroke-width="2"
+           opacity=".8" stroke-linecap="round"/>`;
+  $("#flowhost").innerHTML = `
+  <svg id="flow" viewBox="0 0 480 340">
+    ${line("p-pv", PATHS.pv, "var(--solar)")}
+    ${line("p-batt", PATHS.battI, "var(--batt)")}
+    ${line("p-out", PATHS.out, "var(--home)")}
+    ${line("p-grid", PATHS.gridI, "var(--grid)")}
+    <path id="p-loss" d="${PATHS.loss}" fill="none" stroke="var(--loss)"
+          stroke-width="2" stroke-dasharray="3 3" opacity=".6"/>
+
+    ${dots("d-pv", PATHS.pv, "var(--solar)", 3)}
+    ${dots("d-battO", PATHS.battO, "var(--batt)", 3)}
+    ${dots("d-battI", PATHS.battI, "var(--batt)", 3)}
+    ${dots("d-out", PATHS.out, "var(--home)", 3)}
+    ${dots("d-gridI", PATHS.gridI, "var(--grid)", 3)}
+    ${dots("d-gridE", PATHS.gridE, "var(--grid)", 3)}
+    ${dots("d-loss", PATHS.loss, "var(--loss)", 2)}
+
+    ${flowBox("f-pv", FLOW.pv, "var(--solar)", "\u2600", "SOLAR")}
+    ${flowBox("f-batt", FLOW.batt, "var(--batt)", "\u25AE", "BATTERY")}
+    ${flowBox("f-home", FLOW.home, "var(--home)", "\u2302", "HOME")}
+    ${flowBox("f-grid", FLOW.grid, "var(--grid)", "\u25A4", "GRID")}
+
+    <rect class="box" x="${FLOW.inv.x}" y="${FLOW.inv.y}"
+          width="${FLOW.inv.w}" height="${FLOW.inv.h}" rx="7"/>
+    <rect x="${FLOW.inv.x}" y="${FLOW.inv.y}" width="3.5" height="${FLOW.inv.h}"
+          rx="2" fill="#8b93a7"/>
+    <text x="${FLOW.inv.x + 13}" y="${FLOW.inv.y + 20}">ZENDURE</text>
+    <text class="k" id="f-inv-v" x="${FLOW.inv.x + 13}" y="${FLOW.inv.y + 41}"
+          fill="var(--fg)">–</text>
+
+    <text id="f-loss-v" x="240" y="264" text-anchor="middle" fill="var(--loss)">–</text>
+    <text x="240" y="279" text-anchor="middle" fill="var(--loss)" font-size="10">
+      incl. ~22 W overhead</text>
+  </svg>`;
+}
+
+const strokeW = w => Math.max(1.5, Math.min(11, Math.sqrt(Math.abs(w)) * 0.55));
+
+function setFlow(id, watts) {
+  const el = document.getElementById("p-" + id);
+  const zero = Math.abs(watts) < 0.5;
+  el.setAttribute("stroke-width", zero ? 1.5 : strokeW(watts));
+  el.setAttribute("stroke-dasharray", zero || id === "loss" ? "3 3" : "none");
+  el.setAttribute("opacity", zero ? .35 : .8);
+}
+
+function showDots(id, on) {
+  const g = document.getElementById("d-" + id);
+  if (g) g.style.display = on ? "" : "none";
+}
+
+function setText(id, value, sub) {
+  const v = document.getElementById(id + "-v");
+  if (v) v.textContent = value;
+  const s = document.getElementById(id + "-s");
+  if (s && sub !== undefined) s.textContent = sub;
+}
+
+function renderFlow(l) {
+  const solar = l.solar_input_w || 0;
+  const batt = l.battery_w || 0;
+  const out = l.output_home_w || 0;
+  const grid = l.grid_w === null ? 0 : l.grid_w;
+  const loss = l.losses_w || 0;
+  // Total household consumption: what the Zendure supplies plus whatever the
+  // grid had to make up. Derived, not measured.
+  const home = out + Math.max(0, grid);
+
+  setText("f-pv", solar + " W", solar > 0 ? "PV input" : "no sun");
+  setText("f-batt", (batt > 0 ? "+" : "") + Math.round(batt) + " W",
+          l.soc + "% \u00B7 " + l.battery_state);
+  setText("f-home", Math.round(home) + " W", "consumption");
+  setText("f-grid", (grid >= 0 ? "+" : "") + grid.toFixed(0) + " W",
+          grid >= 0 ? "importing" : "exporting");
+  setText("f-inv", out + " W out");
+  document.getElementById("f-loss-v").textContent = Math.round(loss) + " W lost";
+
+  setFlow("pv", solar);
+  setFlow("batt", batt);
+  setFlow("out", out);
+  setFlow("grid", grid);
+  setFlow("loss", loss);
+
+  // Bidirectional flows swap which direction the dots travel.
+  document.getElementById("p-batt").setAttribute("d",
+    batt > 0 ? PATHS.battO : PATHS.battI);
+  document.getElementById("p-grid").setAttribute("d",
+    grid >= 0 ? PATHS.gridI : PATHS.gridE);
+
+  showDots("pv", solar > 0.5);
+  showDots("battO", batt > 0.5);
+  showDots("battI", batt < -0.5);
+  showDots("out", out > 0.5);
+  showDots("gridI", grid > 0.5);
+  showDots("gridE", grid < -0.5);
+  showDots("loss", loss > 0.5);
+}
+
 // ---------------------------------------------------------------- data flow
 async function get(url) {
   const r = await fetch(url);
@@ -567,6 +734,7 @@ async function refresh(full) {
       `updated ${new Date().toLocaleTimeString()} · last sample ${l.age_s}s ago · ` +
       `${(health.db_bytes / 1e6).toFixed(1)} MB`;
     renderKpis(l, energy, health, solar);
+    renderFlow(l);
 
     if (full || !cache) cache = await get(`/api/series?minutes=${windowMin}`);
     renderCharts(cache, l);
@@ -580,6 +748,7 @@ async function refresh(full) {
   }
 }
 
+buildFlow();
 ["ch-main", "ch-solar", "ch-delta", "ch-soc"].forEach((id, i) =>
   makeChart(id, [260, 180, 200, 160][i]));
 

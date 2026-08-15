@@ -98,6 +98,18 @@ class Api:
             d["battery_state"] = "discharging"
 
         d.update(self._split_sources(d))
+
+        # Conversion losses, by energy balance across the Zendure:
+        #   in  = PV + battery discharge
+        #   out = AC to house + battery charge
+        # With battery_w signed, that collapses to solar - battery - output.
+        # This is where the watts that look "missing" actually go, and most of
+        # it is the fixed ~22 W the inverter draws just to be running (H8).
+        solar = d.get("solar_input_w")
+        if solar is None or out is None:
+            d["losses_w"] = None
+        else:
+            d["losses_w"] = max(0.0, solar - (d["battery_w"] or 0.0) - out)
         d["target_w"] = self.cfg["control"]["targetGridW"]
         d["deadband_w"] = self.cfg["control"]["deadbandW"]
         d["reserve_soc"] = self.cfg["battery"]["reserveSoc"]
