@@ -38,8 +38,9 @@
 
   "solar": {
     "passthroughWhenBlocked": true,
-    "derate": 0.90,
-    "marginW": 10
+    "derate": 0.824,
+    "marginW": 2,
+    "_note": "derate measured 2026-08-15: PV->DC-bus is 82.4% (159W PV -> 131W bus, battery at 0.0A). The old 0.90 was too generous at high PV and, paired with a 10W margin, too stingy at low PV."
   },
 
   "battery": {

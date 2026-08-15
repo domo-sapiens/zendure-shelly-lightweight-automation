@@ -81,6 +81,23 @@ class Api:
         d["age_s"] = int(time.time()) - d["ts"]
         out, dc = d.get("output_home_w"), d.get("pack_power_w")
         d["efficiency"] = round(100.0 * out / dc, 1) if out and dc else None
+
+        # pack_power_w is a magnitude; only batcur carries the direction.
+        # Signed so the dashboard can say "charging" without guessing:
+        # positive = charging, negative = discharging.
+        amps = d.get("bat_a")
+        mag = dc or 0.0
+        if amps is None or abs(amps) < 0.05 or not mag:
+            d["battery_w"] = 0.0
+            d["battery_state"] = "idle"
+        elif amps > 0:
+            d["battery_w"] = mag
+            d["battery_state"] = "charging"
+        else:
+            d["battery_w"] = -mag
+            d["battery_state"] = "discharging"
+
+        d.update(self._split_sources(d))
         d["target_w"] = self.cfg["control"]["targetGridW"]
         d["deadband_w"] = self.cfg["control"]["deadbandW"]
         d["reserve_soc"] = self.cfg["battery"]["reserveSoc"]
@@ -91,6 +108,36 @@ class Api:
         c = self.cfg["collector"]
         d["stale_after_s"] = c["commitEveryS"] + 3 * c["intervalS"]
         return d
+
+    def _split_sources(self, d):
+        """Attribute the AC output between solar and battery.
+
+        The device reports a single AC figure, so the split is inferred. It is
+        apportioned by the two *measured* DC inputs -- PV input and battery
+        discharge -- rather than by treating solar as whatever the loss model
+        cannot account for. Residual attribution looks equivalent but is not:
+        with the battery discharging at 64 W and no sun at all, model error
+        showed up as a phantom 4.7 W of solar. Proportioning by measured inputs
+        cannot invent a source that is reading zero.
+
+        Conversion losses are shared pro rata, so the two shares always sum to
+        the output. Still an inference, not a measurement.
+        """
+        ac = d.get("output_home_w") or 0
+        if ac <= 0:
+            return {"from_solar_w": 0.0, "from_battery_w": 0.0}
+
+        derate = self.cfg.get("solar", {}).get("derate", 0.90)
+        solar_dc = max(0.0, (d.get("solar_input_w") or 0) * derate)
+        battery_dc = max(0.0, -(d.get("battery_w") or 0.0))
+        total = solar_dc + battery_dc
+        if total <= 0:
+            # Output with neither source reading: cannot attribute it.
+            return {"from_solar_w": 0.0, "from_battery_w": 0.0}
+        return {
+            "from_solar_w": ac * solar_dc / total,
+            "from_battery_w": ac * battery_dc / total,
+        }
 
     def series(self, minutes, since=None):
         table = "samples" if minutes <= RAW_MAX_MINUTES else "samples_1m"

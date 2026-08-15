@@ -29,6 +29,8 @@
   .kpi .value { font-size:22px; font-variant-numeric:tabular-nums; margin-top:2px; }
   .kpi .sub { color:var(--dim); font-size:11px; font-variant-numeric:tabular-nums; }
   .kpi.solar .value { color:var(--solar); }
+  .kpi.chg .value { color:var(--actual); }
+  .kpi.dis .value { color:var(--warn); }
 
   .controls { padding:12px 18px; display:flex; gap:8px; align-items:center;
               flex-wrap:wrap; border-bottom:1px solid var(--line); }
@@ -159,6 +161,7 @@ let windowMin = 60, paused = false, cache = null, effData = null, latest = null;
 const charts = {};   // id -> render state, kept for the hover readout
 
 const fmt = (v, d=0) => v === null || v === undefined || isNaN(v) ? "–" : v.toFixed(d);
+const socArrow = st => st === "charging" ? "▲" : st === "discharging" ? "▼" : "■";
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 
 // ---------------------------------------------------------------- chart core
@@ -390,10 +393,15 @@ function renderKpis(l, energy, health, solar) {
      inBand ? "within deadband" : `target ${l.target_w} W ±${l.deadband_w}`, ""],
     ["Solar today", `${fmt(solar.kwh, 2)} kWh`,
      `${solar.date} · peak ${fmt(solar.peak_w)} W`, "solar"],
-    ["Battery out", `${fmt(l.output_home_w)} W`,
-     `commanded ${fmt(l.output_limit)} W`, ""],
-    ["State of charge", `${fmt(l.soc)} %`,
-     `reserve ${l.reserve_soc}% / resume ${l.resume_soc}%`, ""],
+    ["Feed-in to house", `${fmt(l.output_home_w)} W`,
+     `solar ${fmt(l.from_solar_w)} W · battery ${fmt(l.from_battery_w)} W`, ""],
+    ["Battery", `${l.battery_w > 0 ? "+" : ""}${fmt(l.battery_w)} W`,
+     l.battery_state === "charging" ? "charging" :
+     l.battery_state === "discharging" ? "discharging" : "idle",
+     l.battery_state === "charging" ? "chg" :
+     l.battery_state === "discharging" ? "dis" : ""],
+    ["State of charge", `${socArrow(l.battery_state)} ${fmt(l.soc)} %`,
+     `${l.battery_state} · reserve ${l.reserve_soc}% / resume ${l.resume_soc}%`, ""],
     ["Efficiency", l.efficiency ? `${fmt(l.efficiency, 1)} %` : "–",
      l.pack_power_w ? `${fmt(l.pack_power_w)} W DC drawn` : "idle", ""],
     ["Imported 24 h", `${fmt(energy.import_kwh, 2)} kWh`,
