@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Measured vs derived — proposals</title>
+<style>
+  :root {
+    --bg:#12141a; --panel:#1a1d26; --line:#2a2f3c; --fg:#e6e9f0; --dim:#8b93a7;
+    --solar:#f0b429; --batt:#57c98a; --grid:#e0574a; --home:#4a9eda; --loss:#6b7280;
+    --warn:#e0a23c;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); padding:24px;
+         font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  h1 { font-size:17px; margin:0 0 4px; }
+  .lede { color:var(--dim); font-size:13px; margin:0 0 20px; max-width:78ch; }
+  .row { display:flex; gap:16px; flex-wrap:wrap; align-items:flex-start; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+          padding:14px 16px; flex:1 1 430px; min-width:430px; }
+  .card h2 { font-size:13px; margin:0 0 2px; }
+  .card .why { color:var(--dim); font-size:12px; margin:0 0 10px; }
+  svg { width:100%; height:auto; display:block; }
+  .k { font:600 13px ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .lbl { font-size:11px; fill:var(--dim); }
+  .box { fill:#20242e; stroke:var(--line); }
+  .fn { color:var(--dim); font-size:11.5px; margin:8px 0 0; line-height:1.7; }
+  .fn code, code { background:#20242e; padding:1px 5px; border-radius:3px;
+                   font-size:11px; font-family:ui-monospace,Menlo,monospace; }
+  .legend { font-size:11.5px; color:var(--dim); margin:0 0 8px; }
+  .legend b { color:var(--fg); font-weight:600; }
+  table { border-collapse:collapse; width:100%; font-size:12px; margin-top:8px; }
+  th,td { text-align:left; padding:5px 7px; border-bottom:1px solid var(--line);
+          vertical-align:top; }
+  th { color:var(--dim); font-weight:500; font-size:10.5px; text-transform:uppercase;
+       letter-spacing:.05em; }
+  .tier { display:inline-block; padding:1px 6px; border-radius:3px; font-size:10px;
+          font-weight:600; letter-spacing:.03em; }
+  .t-m { background:rgba(87,201,138,.16); color:#57c98a; }
+  .t-d { background:rgba(74,158,218,.16); color:#4a9eda; }
+  .t-e { background:rgba(224,162,60,.16); color:#e0a23c; }
+  footer { color:var(--dim); font-size:12.5px; margin-top:24px; max-width:82ch; }
+  .verdict { border-left:3px solid var(--home); padding-left:12px; margin-top:10px; }
+</style>
+</head>
+<body>
+
+<h1>Marking measured vs derived — four proposals</h1>
+<p class="lede">Same live state in all four, so only the labelling differs. There are
+   arguably <b>three</b> tiers, not two: values read straight off an instrument;
+   values that are exact arithmetic over those readings; and values that additionally
+   depend on a fitted constant. Proposals differ in whether that third tier is worth
+   showing.</p>
+
+<div class="row" id="cards"></div>
+
+<footer>
+  <div class="verdict">
+    <b>My recommendation: C.</b> A footnote marker on only the derived values (A, B)
+    leaves every unmarked number implicitly claiming to be measured — which is fine
+    until someone asks "is SoC measured?" (it is not; the BMS estimates it). C labels
+    everything, so nothing is claimed by omission, and it is the only one that
+    separates <i>exact arithmetic</i> from <i>depends on a fitted constant</i> —
+    the distinction that actually matters when a number looks wrong.
+    D is the most complete but pushes the explanation away from the picture;
+    it works well <i>combined</i> with C as an expandable detail.
+  </div>
+</footer>
+
+<script>
+// One live state, rendered four ways.
+const S = { pv:160, batt:0, out:101, grid:14, soc:14, loss:59 };
+S.home = S.out + S.grid;                       // NB: + grid, not + max(0, grid)
+
+const BOX = {
+  pv:   { x:16,  y:12,  w:104, h:58 },
+  batt: { x:16,  y:210, w:104, h:58 },
+  inv:  { x:172, y:112, w:92,  h:54 },
+  home: { x:316, y:12,  w:104, h:58 },
+  grid: { x:316, y:210, w:104, h:58 },
+};
+const W = 436, H = 300;
+
+function box(b, color, name, value, sub, mark) {
+  return `
+    <rect class="box" x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" rx="6"/>
+    <rect x="${b.x}" y="${b.y}" width="3" height="${b.h}" rx="2" fill="${color}"/>
+    <text class="lbl" x="${b.x + 11}" y="${b.y + 17}">${name}</text>
+    <text class="k" x="${b.x + 11}" y="${b.y + 37}" fill="${color}">${value}${mark || ""}</text>
+    <text class="lbl" x="${b.x + 11}" y="${b.y + 51}">${sub}</text>`;
+}
+
+function skeleton(marks) {
+  const m = marks || {};
+  const line = (d, c, w, dash) =>
+    `<path d="${d}" fill="none" stroke="${c}" stroke-width="${w}"
+           ${dash ? 'stroke-dasharray="3 3"' : ""} opacity=".8" stroke-linecap="round"/>`;
+  return `
+  <svg viewBox="0 0 ${W} ${H}">
+    ${line("M 120 41 H 146 V 132 H 172", "var(--solar)", 6)}
+    ${line("M 120 239 H 146 V 152 H 172", "var(--line)", 1.5, true)}
+    ${line("M 264 136 H 290 V 41 H 316", "var(--home)", 5)}
+    ${line("M 368 210 V 70", "var(--grid)", 2)}
+    ${line("M 218 166 V 214", "var(--loss)", 4, true)}
+
+    ${box(BOX.pv, "var(--solar)", "SOLAR", S.pv + " W", "PV input", m.pv)}
+    ${box(BOX.batt, "var(--batt)", "BATTERY", "0 W", S.soc + "% · idle", m.batt)}
+    ${box(BOX.home, "var(--home)", "HOME", S.home + " W", "consumption", m.home)}
+    ${box(BOX.grid, "var(--grid)", "GRID", "+" + S.grid + " W", "importing", m.grid)}
+
+    <rect class="box" x="${BOX.inv.x}" y="${BOX.inv.y}" width="${BOX.inv.w}"
+          height="${BOX.inv.h}" rx="6"/>
+    <rect x="${BOX.inv.x}" y="${BOX.inv.y}" width="3" height="${BOX.inv.h}" rx="2" fill="#8b93a7"/>
+    <text class="lbl" x="${BOX.inv.x + 11}" y="${BOX.inv.y + 18}">ZENDURE</text>
+    <text class="k" x="${BOX.inv.x + 11}" y="${BOX.inv.y + 37}" fill="var(--fg)">${S.out} W${m.out || ""}</text>
+
+    <text class="lbl" x="218" y="232" text-anchor="middle" fill="var(--loss)">${S.loss} W lost${m.loss || ""}</text>
+  </svg>`;
+}
+
+const sup = t => `<tspan font-size="9" dy="-5" fill="var(--dim)">${t}</tspan>`;
+
+const CARDS = [
+  {
+    t: "A — Asterisk + footnote",
+    why: "Minimal, conventional, exactly what was suggested. Only derived values carry a marker.",
+    body: skeleton({ home: sup("*"), loss: sup("**") }) + `
+      <p class="fn">
+        <b>*</b> <code>HOME = ZENDURE out + GRID</code> — arithmetic over two meter readings.<br>
+        <b>**</b> <code>LOSSES = SOLAR − BATTERY − ZENDURE out</code> — energy balance across the device.<br>
+        Everything unmarked is read directly from a device.
+      </p>`
+  },
+  {
+    t: "B — Typographic, no symbols",
+    why: "Derived values are set in a lighter weight with a dotted underline. Nothing is added to the numbers themselves.",
+    body: skeleton().replace(
+      `<text class="k" x="327" y="49" fill="var(--home)">115 W</text>`,
+      `<text class="k" x="327" y="49" fill="var(--home)" font-weight="400"
+             style="text-decoration:underline dotted 1px">115 W</text>`)
+      .replace(`fill="var(--loss)">59 W lost`,
+               `fill="var(--loss)" style="text-decoration:underline dotted 1px">59 W lost`) + `
+      <p class="legend"><span style="text-decoration:underline dotted 1px">dotted underline</span>
+        = calculated, not measured. Hover any value for its formula.</p>
+      <p class="fn">Quieter than a symbol, and it survives being read at a glance.
+        But the cue is easy to miss on a phone, and it cannot express more than
+        two tiers.</p>`
+  },
+  {
+    t: "C — Three tiers, every value labelled",
+    why: "Nothing is claimed by omission. Separates exact arithmetic from anything that leans on a fitted constant.",
+    body: skeleton({ pv: sup("M"), batt: sup("M"), out: sup("M"),
+                     grid: sup("M"), home: sup("D"), loss: sup("D") }) + `
+      <p class="legend">
+        <span class="tier t-m">M</span> measured &nbsp;
+        <span class="tier t-d">D</span> derived — exact arithmetic &nbsp;
+        <span class="tier t-e">E</span> estimated — uses a fitted constant
+      </p>
+      <p class="fn">
+        <span class="tier t-d">D</span> <code>HOME = out + grid</code><br>
+        <span class="tier t-d">D</span> <code>LOSSES = solar − battery − out</code><br>
+        <span class="tier t-e">E</span> the KPI row's <i>solar/battery split</i> is tier E:
+        it apportions output by measured DC inputs scaled by the adaptive
+        <code>derate</code>, so it moves if that estimate is off.<br>
+        <span class="tier t-m">M</span> caveat worth stating: <b>SoC is not truly measured</b> —
+        the BMS estimates it. Shown as M because that is what the device reports.
+      </p>`
+  },
+  {
+    t: "D — Clean diagram, provenance table",
+    why: "The picture stays uncluttered; every number is accounted for underneath, including its source field.",
+    body: skeleton() + `
+      <table>
+        <tr><th>Value</th><th>Tier</th><th>Where it comes from</th></tr>
+        <tr><td>Solar</td><td><span class="tier t-m">M</span></td>
+            <td><code>properties.solarInputPower</code> (PV side, device's own MPPT reading)</td></tr>
+        <tr><td>Battery</td><td><span class="tier t-m">M</span></td>
+            <td><code>totalVol × batcur</code>, sign-corrected. Quantised to ~5 W</td></tr>
+        <tr><td>Zendure out</td><td><span class="tier t-m">M</span></td>
+            <td><code>properties.outputHomePower</code></td></tr>
+        <tr><td>Grid</td><td><span class="tier t-m">M</span></td>
+            <td><code>EM.GetStatus.total_act_power</code> — the Shelly, an instrument
+                independent of the Zendure</td></tr>
+        <tr><td>SoC</td><td><span class="tier t-e">E</span></td>
+            <td><code>properties.electricLevel</code> — a BMS <i>estimate</i>, not a measurement</td></tr>
+        <tr><td>Home</td><td><span class="tier t-d">D</span></td>
+            <td><code>out + grid</code>. Assumes the Shelly sees all household load</td></tr>
+        <tr><td>Losses</td><td><span class="tier t-d">D</span></td>
+            <td><code>solar − battery − out</code>. Assumes no other DC source and
+                that the three readings are simultaneous — they are not, so transients
+                show up here</td></tr>
+      </table>`
+  },
+];
+
+document.getElementById("cards").innerHTML = CARDS.map(c =>
+  `<div class="card"><h2>${c.t}</h2><p class="why">${c.why}</p>${c.body}</div>`).join("");
+</script>
+</body>
+</html>

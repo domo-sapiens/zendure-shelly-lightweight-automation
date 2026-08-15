@@ -680,8 +680,11 @@ function renderFlow(l) {
   const grid = l.grid_w === null ? 0 : l.grid_w;
   const loss = l.losses_w || 0;
   // Total household consumption: what the Zendure supplies plus whatever the
-  // grid had to make up. Derived, not measured.
-  const home = out + Math.max(0, grid);
+  // grid had to make up -- or minus whatever went back out to it. Signed, not
+  // max(0, grid): while exporting, the exported watts are NOT being consumed at
+  // home, and clamping the grid term overstated consumption by exactly the
+  // exported amount. Derived, not measured.
+  const home = out + grid;
 
   setText("f-pv", solar + " W", solar > 0 ? "PV input" : "no sun");
   setText("f-batt", (batt > 0 ? "+" : "") + Math.round(batt) + " W",
