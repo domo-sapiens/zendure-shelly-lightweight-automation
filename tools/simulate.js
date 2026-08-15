@@ -13,6 +13,7 @@ function loadScript(opts) {
     writes: [],       // POST bodies actually sent
     logs: [],
     gridPower: opts.gridPower,
+    batteryW: opts.batteryW || 0,     // signed: + charging, - discharging
     props: Object.assign({}, opts.props),
   };
 
@@ -42,7 +43,8 @@ function deliver({ drop = false } = {}) {
   if (!call) return null;
   if (drop) return call;           // simulate a callback that never fires
   if (call.method === 'HTTP.GET') {
-    call.cb({ code: 200, body: JSON.stringify({ sn: 'TEST', properties: env.props }) }, 0, '');
+    call.cb({ code: 200, body: JSON.stringify({
+      sn: 'TEST', properties: env.props, packData: [packOf(env.batteryW)] }) }, 0, '');
   } else {
     env.writes.push(JSON.parse(call.params.body));
     call.cb({ code: 200, body: '{}' }, 0, '');
@@ -56,6 +58,15 @@ function tickN(n, opts = {}) {
     if (!opts.dropAll) deliver();
     if (env.pending.length && !opts.dropAll) deliver(); // the POST, if any
   }
+}
+
+// batcur is a signed int16 carried in an unsigned field, at 0.1 A resolution,
+// against a ~49.4 V pack. Encode watts the way the device would report them.
+function packOf(watts) {
+  const volts = 49.4;
+  let deci = Math.round((watts || 0) / volts * 10);
+  if (deci < 0) deci += 65536;
+  return { batcur: deci, totalVol: Math.round(volts * 100), power: Math.abs(watts || 0) };
 }
 
 let failures = 0;
@@ -184,6 +195,122 @@ deliver(); deliver();
 const normal = env.writes.length ? env.writes[0].properties.outputLimit : null;
 check('healthy SoC is not capped by solar', normal !== null && normal > 150,
       'wrote ' + normal + 'W (solar was only 50W)');
+
+// ---------------------------------------------------------------------------
+console.log('\n[4f] Adaptive derate: feedback on measured battery current');
+
+// Simulated hardware that can only truly deliver `realCap` watts of AC from
+// solar. Anything commanded beyond that is drawn from the battery; anything
+// left unused charges it. The loop should find realCap without being told.
+function converge(realCap, steps, solar) {
+  const sb = loadScript({ gridPower: 400, batteryW: 0,
+    props: { ...baseProps, electricLevel: 14, outputLimit: 0,
+             outputHomePower: 0, solarInputPower: solar || 200 } });
+  const accept = () => {
+    if (env.writes.length) env.props.outputLimit = env.writes[0].properties.outputLimit;
+  };
+  deliver(); deliver(); accept();
+
+  const trace = [];
+  for (let i = 0; i < steps; i++) {
+    const cmd = env.props.outputLimit;
+    env.props.outputHomePower = cmd;            // device complies (H3)
+    env.batteryW = (realCap - cmd) * 1.05;      // shortfall comes from the pack
+    env.writes.length = 0;
+    env.timerFn(); deliver(); deliver(); accept();
+    trace.push({ cmd: env.props.outputLimit, bat: Math.round(env.batteryW),
+                 derate: sb.state.derate });
+  }
+  return trace;
+}
+
+let t = converge(105, 30);
+let last = t[t.length - 1];
+console.log(`      hardware supports 105W -> settled at ${last.cmd}W, ` +
+            `battery ${last.bat}W, derate ${last.derate.toFixed(3)}`);
+check('converges to battery-neutral', Math.abs(last.bat) <= 8,
+      'battery settled at ' + last.bat + 'W');
+check('settles near the true capability', Math.abs(last.cmd - 105) <= 10,
+      'commanded ' + last.cmd + 'W vs true 105W');
+check('no sustained discharge once settled',
+      t.slice(15).every(x => x.bat > -12),
+      'worst late draw ' + Math.min(...t.slice(15).map(x => x.bat)) + 'W');
+
+// Hardware far better than the seeded guess: the cap must climb rather than
+// leave free solar unused.
+t = converge(170, 30);
+last = t[t.length - 1];
+console.log(`      hardware supports 170W -> settled at ${last.cmd}W, ` +
+            `derate ${t[0].derate.toFixed(3)} -> ${last.derate.toFixed(3)}`);
+check('raises the cap when solar is being left unused',
+      last.cmd > t[0].cmd && Math.abs(last.cmd - 170) <= 18,
+      t[0].cmd + 'W -> ' + last.cmd + 'W (true 170W)');
+
+// Hardware worse than the guess: must back off rather than keep draining.
+t = converge(60, 30);
+last = t[t.length - 1];
+console.log(`      hardware supports 60W -> settled at ${last.cmd}W, ` +
+            `derate ${t[0].derate.toFixed(3)} -> ${last.derate.toFixed(3)}`);
+check('lowers the cap when the battery is being drained',
+      last.cmd < t[0].cmd && Math.abs(last.bat) <= 8,
+      t[0].cmd + 'W -> ' + last.cmd + 'W, battery ' + last.bat + 'W');
+
+// A house wanting less than the panels make is legitimate surplus, not
+// evidence the cap is too low. The derate must not ratchet upward.
+{
+  const sb = loadScript({ gridPower: 0, batteryW: +150,
+    props: { ...baseProps, electricLevel: 14, outputLimit: 30,
+             outputHomePower: 30, solarInputPower: 400 } });
+  deliver(); deliver();
+  const before = sb.state.derate;
+  for (let i = 0; i < 12; i++) { env.writes.length = 0; env.timerFn(); deliver(); deliver(); }
+  check('legitimate surplus does not ratchet the cap upward',
+        Math.abs(sb.state.derate - before) < 1e-9,
+        before.toFixed(3) + ' -> ' + sb.state.derate.toFixed(3));
+}
+
+// Safety: discharge must correct downward even when the cap is not binding.
+{
+  const sb = loadScript({ gridPower: 300, batteryW: -60,
+    props: { ...baseProps, electricLevel: 14, outputLimit: 50,
+             outputHomePower: 50, solarInputPower: 200 } });
+  deliver(); deliver();
+  const before = sb.state.derate;
+  env.timerFn(); deliver(); deliver();
+  check('discharge lowers the derate even when the cap is not binding',
+        sb.state.derate < before,
+        before.toFixed(3) + ' -> ' + sb.state.derate.toFixed(3));
+}
+
+// batcur resolves to ~5W, so a neutral battery reads exactly 0. That reading
+// must be a stable equilibrium, not a target the loop chases downward forever.
+{
+  const sb = loadScript({ gridPower: 400, batteryW: 0,
+    props: { ...baseProps, electricLevel: 14, outputLimit: 100,
+             outputHomePower: 100, solarInputPower: 200 } });
+  deliver(); deliver();
+  const before = sb.state.derate;
+  for (let i = 0; i < 40; i++) {
+    env.writes.length = 0; env.timerFn(); deliver(); deliver();
+    if (env.writes.length) env.props.outputLimit = env.writes[0].properties.outputLimit;
+    env.props.outputHomePower = env.props.outputLimit;
+  }
+  check('a battery reading 0W does not drift the derate',
+        Math.abs(sb.state.derate - before) < 1e-9,
+        before.toFixed(3) + ' -> ' + sb.state.derate.toFixed(3) + ' over 40 cycles');
+}
+
+// The derate must never run away outside its configured bounds.
+{
+  const sb = loadScript({ gridPower: 2000, batteryW: -400,
+    props: { ...baseProps, electricLevel: 14, outputLimit: 400,
+             outputHomePower: 400, solarInputPower: 100 } });
+  deliver(); deliver();
+  for (let i = 0; i < 60; i++) { env.writes.length = 0; env.timerFn(); deliver(); deliver(); }
+  check('derate stays within its clamps under extreme error',
+        sb.state.derate >= 0.30 - 1e-9 && sb.state.derate <= 1.0 + 1e-9,
+        'derate ' + sb.state.derate.toFixed(3));
+}
 
 // ---------------------------------------------------------------------------
 console.log('\n[5] Watchdog recovers from a callback that never fires');

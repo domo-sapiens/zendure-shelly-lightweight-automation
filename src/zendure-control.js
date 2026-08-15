@@ -23,6 +23,12 @@ var state = {
   // restart, so it is re-derived from SoC rather than assumed open.
   dischargeBlocked: null,
 
+  // Live PV-to-bus efficiency, seeded from config and then corrected against
+  // measured battery current. lastCap is kept so the next cycle can tell
+  // whether the cap was actually holding output back.
+  derate: 0,
+  lastCap: null,
+
   pollErrors: 0,
   writeErrors: 0,
   consecutiveErrors: 0,
@@ -130,10 +136,73 @@ function solarPassthroughCap(props) {
   var dc = props.solarInputPower;
   if (typeof dc === "undefined" || dc === null || dc <= 0) return 0;
 
-  var usable = dc * CFG.solar.derate - CFG.inverter.overheadW;
+  var usable = dc * state.derate - CFG.inverter.overheadW;
   if (usable <= 0) return 0;
   var cap = ~~(usable / CFG.inverter.slope - CFG.solar.marginW);
   return cap > 0 ? cap : 0;
+}
+
+// Signed battery power in watts: positive charging, negative discharging.
+// batcur is an unsigned field carrying a signed int16 (H6), so discharging
+// reads as ~65509 and must be corrected before it means anything.
+function batteryPowerW(report) {
+  var packs = report.packData;
+  if (!packs || !packs.length) return null;
+  var pk = packs[0];
+  if (typeof pk.batcur === "undefined" || typeof pk.totalVol === "undefined") {
+    return null;
+  }
+  var cur = pk.batcur;
+  if (cur > 32767) cur = cur - 65536;
+  return (pk.totalVol / 100) * (cur / 10);
+}
+
+// Close the loop on the passthrough cap instead of trusting a fixed constant.
+//
+// The cap used to come from a measured-once derate. But PV-to-bus efficiency is
+// not one number: it moves with irradiance, temperature, SoC and how hard the
+// MPPT is being driven. A feed-forward constant is therefore wrong nearly
+// everywhere, and wrong in the direction that quietly drains the battery.
+//
+// Battery current is directly observable, so the error is measurable rather
+// than assumed: while the cap is holding output back, the battery should sit at
+// or just above zero. Any discharge means the cap is too high; charging with
+// the cap still binding means it is too low and solar is being left unused.
+//
+// The correction is applied to the derate rather than to the cap in watts, so
+// it scales across solar levels instead of having to be relearned whenever the
+// sun changes.
+function adaptDerate(batW, blocked, capBinding, solarW) {
+  if (!CFG.solar.adaptive || !blocked) return;
+  if (batW === null || !solarW || solarW <= 0) return;
+
+  var err = batW - CFG.solar.targetBatteryW;
+  var dead = CFG.solar.batteryDeadbandW;
+
+  // The deadband must exceed the sensor quantum. batcur is reported at 0.1 A,
+  // which against a ~49 V pack is ~5 W, so a genuinely neutral battery reads
+  // exactly 0. Chasing a target finer than that resolution makes the loop
+  // correct downward forever against a reading it can never satisfy -- observed
+  // live as a steady 0.824 -> 0.747 drift with the battery sitting at 0 W.
+
+  // Discharging always corrects downward -- that is the safety direction, and
+  // it must not wait for the cap to be provably the cause.
+  // Charging only corrects upward when the cap is actually binding, otherwise a
+  // house that simply wants less than the panels make would ratchet the cap to
+  // maximum on legitimate surplus.
+  if (err > dead && !capBinding) return;
+  if (err > -dead && err < dead) return;
+
+  // Convert the battery error into the derate error that would explain it.
+  var adj = CFG.solar.adaptGain * err * CFG.inverter.slope / solarW;
+  var next = state.derate + adj;
+  next = clamp(next, CFG.solar.derateMin, CFG.solar.derateMax);
+
+  if (next !== state.derate) {
+    log(2, "derate " + state.derate.toFixed(3) + " -> " + next.toFixed(3) +
+           " (battery " + ~~batW + "W, solar " + solarW + "W)");
+    state.derate = next;
+  }
 }
 
 // The value we regulate *from*. "actual" tracks what the battery really pushes
@@ -300,9 +369,18 @@ function tick() {
       }
 
       var blocked = updateDischargeGate(props);
+
+      // Correct the derate from measured battery current before it is used, so
+      // the correction takes effect on this cycle rather than the next.
+      var batW = batteryPowerW(report);
+      var capBinding = state.lastCap !== null &&
+                       props.outputLimit >= state.lastCap - 1;
+      adaptDerate(batW, blocked, capBinding, props.solarInputPower);
+
       // Below the reserve the battery must not be drained, but solar arriving
       // now can still be passed straight to the house.
       var ceiling = blocked ? solarPassthroughCap(props) : CFG.zendure.maxOutputW;
+      state.lastCap = blocked ? ceiling : null;
 
       log(3, "soc=" + props.electricLevel + "% minSoc=" + props.minSoc / 10 +
              "% socSet=" + props.socSet / 10 + "% acMode=" + props.acMode +
@@ -310,7 +388,9 @@ function tick() {
       log(2, "grid=" + grid + "W outputLimit=" + props.outputLimit +
              "W outputHomePower=" + props.outputHomePower + "W soc=" +
              props.electricLevel + "% solar=" + props.solarInputPower + "W" +
-             (blocked ? " [reserve, solarCap=" + ceiling + "W]" : ""));
+             (batW === null ? "" : " bat=" + ~~batW + "W") +
+             (blocked ? " [reserve, solarCap=" + ceiling + "W, derate=" +
+                        state.derate.toFixed(3) + "]" : ""));
 
       var setpoint = computeSetpoint(props, grid, blocked, ceiling);
       var minSoc = computeMinSoc(props);
@@ -333,6 +413,8 @@ function tick() {
     }
   );
 }
+
+state.derate = CFG.solar.derate;
 
 log(1, "zendure zero-feed-in starting: zendure=" + CFG.zendure.host +
        " interval=" + CFG.control.intervalMs + "ms target=" +

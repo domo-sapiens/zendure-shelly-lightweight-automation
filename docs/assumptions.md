@@ -118,7 +118,9 @@ does not.
 | C7 | `basis` | `"actual"` | Regulating from `outputHomePower` rather than `outputLimit` stops the setpoint winding up when the battery cannot comply. |
 | C8 | `reserveSoc` / `resumeSoc` | 15 % / 20 % | Owner asked never to discharge to ≤10 %. The gap prevents chatter at the floor. |
 | C9 | `solar.passthroughWhenBlocked` | `true` | Below the reserve, output is capped at what solar alone supports instead of forced to 0. See §7. |
-| C10 | `solar.derate` / `solar.marginW` | 0.90 / 10 W | `solarInputPower` is measured PV-side; the cap errs low so the battery holds steady rather than quietly draining. Calibrated live: 144 W solar → 92 W AC with battery current at exactly 0.0 A. |
+| C10 | `solar.derate` | **0.824 (seed only)** | Starting estimate for PV→DC-bus efficiency. No longer a fixed constant — see C11. |
+| C11 | `solar.adaptive` | `true` | The cap is **feedback-controlled** on measured battery current, not feed-forward from a constant. See §8. |
+| C12 | `solar.batteryDeadbandW` | **12 W** | Must exceed the ~5 W sensor quantum, or the loop chases a target it cannot resolve. See §8. |
 
 **C4, C5 and C6 are the untuned ones.** They were inherited or guessed, and
 they are what the collected data is for. Do not treat them as considered
@@ -328,3 +330,56 @@ climb toward `resumeSoc`. That is correct: it only refuses to recharge by
 starving the house. Whenever solar genuinely exceeds household load the loop
 settles at grid ≈ 0 and the surplus charges the battery as normal — the battery
 fills from real surplus, never from energy the house needed anyway.
+
+
+## 8. Why the passthrough cap is feedback-controlled
+
+The cap started as feed-forward: measure PV→DC-bus efficiency once, hard-code it
+as `derate`, compute the cap from it. That was wrong in principle, and the
+reason is worth recording.
+
+**PV→bus efficiency is not one number.** It moves with irradiance, cell
+temperature, SoC, and how hard the MPPT is being driven. A single constant is
+therefore right at one operating point and wrong everywhere else — and wrong in
+the direction that silently drains the battery, which is precisely what the
+reserve exists to prevent. Measured values across conditions ranged from 60 % to
+82 % depending on mode.
+
+**The error is directly observable.** Battery current tells us, every cycle,
+whether the cap is too high (battery discharging while blocked) or too low
+(battery charging while the cap is still holding output back). There is no need
+to predict what can be measured.
+
+So the derate is now seeded from C10 and then corrected from measured battery
+current each cycle. The correction is applied to the *derate* rather than to the
+cap in watts, so it scales across solar levels instead of needing to be
+relearned whenever the sun changes.
+
+Two conditions make it safe:
+
+- **Discharge always corrects downward**, without waiting for proof that the cap
+  caused it. Safety does not wait for attribution.
+- **Charging only corrects upward when the cap is actually binding.** Otherwise a
+  house drawing less than the panels produce — legitimate surplus charging —
+  would ratchet the cap to maximum for no reason.
+
+### The sensor-resolution trap
+
+First live deployment drifted steadily downward, 0.824 → 0.747, while the
+battery sat at a constant 0 W.
+
+`batcur` is reported at 0.1 A resolution, which against a ~49 V pack is **~5 W**.
+A genuinely neutral battery therefore reads exactly 0. The target was +5 W with a
+±5 W deadband — finer than the sensor can resolve — so the controller kept
+correcting downward against a reading it could never satisfy.
+
+**The deadband must exceed the sensor quantum.** Now 12 W against a ~5 W quantum,
+with the target at +8 W so the equilibrium band is roughly −4 W to +20 W: any
+resolvable discharge is corrected, and a neutral reading is a stable fixed point.
+Verified live: derate held at 0.824 across 14 consecutive cycles with the battery
+at 0 W.
+
+`derateMin` is 0.30, deliberately far below any plausible real efficiency. It
+exists to catch runaway, not to bound the physics — an earlier value of 0.55
+stopped the loop backing off far enough to protect the battery when the true
+capability was lower than the clamp allowed.

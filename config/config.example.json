@@ -40,6 +40,12 @@
     "passthroughWhenBlocked": true,
     "derate": 0.824,
     "marginW": 2,
+    "adaptive": true,
+    "targetBatteryW": 8,
+    "batteryDeadbandW": 12,
+    "adaptGain": 0.35,
+    "derateMin": 0.30,
+    "derateMax": 1.0,
     "_note": "derate measured 2026-08-15: PV->DC-bus is 82.4% (159W PV -> 131W bus, battery at 0.0A). The old 0.90 was too generous at high PV and, paired with a 10W margin, too stingy at low PV."
   },
 
