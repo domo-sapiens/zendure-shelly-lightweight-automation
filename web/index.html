@@ -717,6 +717,21 @@ function renderFlow(l) {
 }
 
 // ---------------------------------------------------------------- data flow
+// /api/health averages over 24h of a 240k-row table and costs ~0.29s on the
+// Pi -- half the work of a whole refresh cycle. None of what it reports (link
+// success rates, row counts, db size) changes meaningfully in 5 seconds, so it
+// is fetched on its own slower cadence and served from cache in between.
+const HEALTH_EVERY_MS = 30000;
+let healthCache = null, healthAt = 0;
+
+async function getHealth() {
+  const now = Date.now();
+  if (healthCache && now - healthAt < HEALTH_EVERY_MS) return healthCache;
+  const h = await get("/api/health");
+  healthCache = h; healthAt = now;
+  return h;
+}
+
 async function get(url) {
   const r = await fetch(url);
   const j = await r.json();
@@ -727,7 +742,7 @@ async function get(url) {
 async function refresh(full) {
   try {
     const [l, health, energy, solar] = await Promise.all([
-      get("/api/latest"), get("/api/health"),
+      get("/api/latest"), getHealth(),
       get("/api/energy?hours=24"), get("/api/solar")]);
     latest = l;
     if (!l.ok) { $("#updated").textContent = "no samples yet"; return; }
