@@ -742,11 +742,29 @@ async function get(url) {
   return j;
 }
 
+// The server inlines the first payload, so the opening render needs no
+// network at all. Consumed once, then normal polling takes over.
+let booted = false;
+function takeBoot() {
+  const b = window.__BOOT__;
+  if (!b || booted) return null;
+  booted = true;
+  const at = Date.now();
+  slowCache["/api/health"] = { data: b.health, at: at };
+  slowCache["/api/energy?hours=24"] = { data: b.energy, at: at };
+  slowCache["/api/solar"] = { data: b.solar, at: at };
+  if (b.series && windowMin === 60) cache = b.series;
+  return b;
+}
+
 async function refresh(full) {
   try {
-    const [l, health, energy, solar] = await Promise.all([
-      get("/api/latest"), getSlow("/api/health"),
-      getSlow("/api/energy?hours=24"), getSlow("/api/solar")]);
+    const b = takeBoot();
+    const [l, health, energy, solar] = b
+      ? [b.latest, b.health, b.energy, b.solar]
+      : await Promise.all([
+          get("/api/latest"), getSlow("/api/health"),
+          getSlow("/api/energy?hours=24"), getSlow("/api/solar")]);
     latest = l;
     if (!l.ok) { $("#updated").textContent = "no samples yet"; return; }
 

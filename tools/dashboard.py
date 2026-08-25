@@ -399,8 +399,23 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             if u.path in ("/", "/index.html"):
-                with open(os.path.join(WEB_DIR, "index.html"), "rb") as fh:
-                    return self._send(200, fh.read(), "text/html; charset=utf-8")
+                with open(os.path.join(WEB_DIR, "index.html")) as fh:
+                    html = fh.read()
+                # Inline the first payload so the page paints real values
+                # immediately instead of flashing placeholders while four
+                # fetches land. Also saves a round trip on every load, and it
+                # is what lets a headless screenshot capture a populated page:
+                # Firefox shoots on the load event and cannot be told to wait.
+                boot = {
+                    "latest": self.api.latest(),
+                    "health": self.api.health(),
+                    "energy": self.api.energy(24),
+                    "solar": self.api.solar(),
+                    "series": self.api.series(60),
+                }
+                tag = "<script>window.__BOOT__=%s;</script>" % json.dumps(boot)
+                html = html.replace("</head>", tag + "</head>", 1)
+                return self._send(200, html, "text/html; charset=utf-8")
             if u.path == "/api/latest":
                 return self._json(self.api.latest())
             if u.path == "/api/series":
