@@ -406,12 +406,19 @@ class Handler(BaseHTTPRequestHandler):
                 # fetches land. Also saves a round trip on every load, and it
                 # is what lets a headless screenshot capture a populated page:
                 # Firefox shoots on the load event and cannot be told to wait.
+                # Boot the window the page will actually open on, or the
+                # series is for the wrong range and the page refetches --
+                # which puts the first chart render after the load event.
+                win = num("window", 60)
+                if win not in (15, 60, 360, 1440, 10080):
+                    win = 60
                 boot = {
+                    "window": win,
                     "latest": self.api.latest(),
                     "health": self.api.health(),
                     "energy": self.api.energy(24),
                     "solar": self.api.solar(),
-                    "series": self.api.series(60),
+                    "series": self.api.series(win),
                     "efficiency": self.api.efficiency(168),
                 }
                 tag = "<script>window.__BOOT__=%s;</script>" % json.dumps(boot)
