@@ -759,6 +759,7 @@ function takeBoot() {
   slowCache["/api/energy?hours=24"] = { data: b.energy, at: at };
   slowCache["/api/solar"] = { data: b.solar, at: at };
   if (b.series && windowMin === 60) cache = b.series;   // boot payload is the 1h view
+  if (b.efficiency) effData = b.efficiency;
   return b;
 }
 
@@ -780,13 +781,16 @@ async function refresh(full) {
     renderKpis(l, energy, health, solar);
     renderFlow(l);
 
-    if (full || !cache) cache = await get(`/api/series?minutes=${windowMin}`);
+    const haveBootSeries = b && b.series && windowMin === 60;
+    if (!cache || (full && !haveBootSeries)) {
+      cache = await get(`/api/series?minutes=${windowMin}`);
+    }
     renderCharts(cache, l);
 
-    if (full || !effData) {
-      effData = await get("/api/efficiency?hours=168");
-      renderEfficiency(effData);
+    if (!effData || (full && !(b && b.efficiency))) {
+      effData = await getSlow("/api/efficiency?hours=168");
     }
+    renderEfficiency(effData);
   } catch (e) {
     $("#updated").textContent = "error — " + e.message;
   }

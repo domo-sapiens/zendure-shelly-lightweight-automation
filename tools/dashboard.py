@@ -412,6 +412,7 @@ class Handler(BaseHTTPRequestHandler):
                     "energy": self.api.energy(24),
                     "solar": self.api.solar(),
                     "series": self.api.series(60),
+                    "efficiency": self.api.efficiency(168),
                 }
                 tag = "<script>window.__BOOT__=%s;</script>" % json.dumps(boot)
                 html = html.replace("</head>", tag + "</head>", 1)
