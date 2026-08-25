@@ -179,7 +179,12 @@
 
 <script>
 const $ = s => document.querySelector(s);
-let windowMin = 60, paused = false, cache = null, effData = null, latest = null;
+// ?window=<minutes> makes a given view linkable, and is how the repo's
+// screenshots are captured without a click.
+const WINDOWS = [15, 60, 360, 1440, 10080];
+const urlWin = parseInt(new URLSearchParams(location.search).get("window"), 10);
+let windowMin = WINDOWS.indexOf(urlWin) >= 0 ? urlWin : 60;
+let paused = false, cache = null, effData = null, latest = null;
 const charts = {};   // id -> render state, kept for the hover readout
 
 const fmt = (v, d=0) => v === null || v === undefined || isNaN(v) ? "–" : v.toFixed(d);
@@ -753,7 +758,7 @@ function takeBoot() {
   slowCache["/api/health"] = { data: b.health, at: at };
   slowCache["/api/energy?hours=24"] = { data: b.energy, at: at };
   slowCache["/api/solar"] = { data: b.solar, at: at };
-  if (b.series && windowMin === 60) cache = b.series;
+  if (b.series && windowMin === 60) cache = b.series;   // boot payload is the 1h view
   return b;
 }
 
@@ -791,6 +796,8 @@ buildFlow();
 ["ch-main", "ch-solar", "ch-delta", "ch-soc"].forEach((id, i) =>
   makeChart(id, [260, 180, 200, 160][i]));
 
+document.querySelectorAll("[data-min]").forEach(b =>
+  b.classList.toggle("on", +b.dataset.min === windowMin));
 document.querySelectorAll("[data-min]").forEach(b => b.onclick = () => {
   document.querySelectorAll("[data-min]").forEach(x => x.classList.remove("on"));
   b.classList.add("on");
@@ -814,6 +821,14 @@ window.addEventListener("resize", () => {
   clearTimeout(rt);
   rt = setTimeout(redraw, 150);
 });
+// A chart rendered while its container still measures 0 px wide draws nothing,
+// and previously nothing ever came back to redraw it -- blank charts on any
+// slow first layout. Observing the container means they draw the moment they
+// have a size.
+if (window.ResizeObserver) {
+  const ro = new ResizeObserver(() => { clearTimeout(rt); rt = setTimeout(redraw, 30); });
+  Object.values(charts).forEach(c => ro.observe(c.host));
+}
 // Charts drawn while the tab was hidden have no usable geometry; redraw on
 // return rather than leaving a blank or broken canvas.
 document.addEventListener("visibilitychange", () => {
