@@ -1,40 +1,131 @@
-# Zendure ↔ Shelly lightweight automation
+# Zendure ↔ Shelly zero-feed-in controller
 
-Zero-feed-in control for a Zendure SolarFlow 800 Plus, driven by a script that
-runs **on the Shelly Pro 3EM itself**. No cloud, no MQTT broker, no Home
-Assistant. See [the research notes](zendure-shelly-direct-shelly-script.md) for
-where this approach comes from, and [the HA alternative](zendure-shelly-home-assistant-path.md)
-for the path not taken.
+Keeps household grid draw at **zero watts** by matching a Zendure SolarFlow 800
+Plus battery's output to live demand — with the control loop running **on the
+Shelly Pro 3EM energy meter itself**. No cloud, no MQTT broker, no home
+automation platform, no always-on server for the control path.
 
-## How it works
+A Raspberry Pi alongside it logs everything and serves a dashboard, but it is
+deliberately *outside* the control path: if the Pi dies, regulation carries on.
 
-Every `intervalMs`, the script on the Shelly:
+![The dashboard: live energy flow, seven days of history, and the measured
+inverter efficiency curve](docs/screenshots/dashboard-overview.png)
 
-1. `GET http://<zendure>/properties/report` — SoC, output limit, actual output
-2. reads its own energy meter locally (no network call)
-3. computes a new `outputLimit` so grid power lands on `targetGridW`
-4. `POST http://<zendure>/properties/write` — but only if the value moved enough
-   to be worth writing
+## What it does
 
-## Layout
+- **Regulates grid power to 0 W.** Reads the meter locally, computes a new
+  battery setpoint, writes it over the Zendure's local HTTP API — every 5 s.
+- **Uses solar directly rather than storing it first.** Sending 160 W of solar
+  straight to the house delivers 131 W; storing and later discharging it
+  delivers 103 W. Measured, not assumed.
+- **Protects the battery** with a reserve floor and hysteresis, and never lets
+  the solar-passthrough path quietly drain it.
+- **Logs 82 fields at 5 s** into SQLite and serves a dependency-free dashboard.
+- **Runs unattended.** Watchdog for silent lock-ups, survives reboots, degrades
+  safely when the Wi-Fi link drops.
+
+## The live energy flow
+
+Every value on the card is read from a device or derived from readings that are.
+Losses are shown explicitly, because they are where the watts that look missing
+actually go — most of it the fixed ~22 W the inverter draws just to be running.
+
+![Energy flow between solar, battery, inverter, home and grid, with conversion
+losses shown explicitly](docs/screenshots/energy-flow.png)
+
+## History and diagnostics
+
+![Grid power against the target deadband, solar input, and the tracking-error
+panel](docs/screenshots/charts.png)
+
+The tracking-error panel separates two faults that look identical if you plot
+only one of them: **regulation error** (how far grid power sits from target —
+mistuned gain shows up as oscillation through zero) and **saturation gap** (what
+the battery was asked for minus what it delivered — non-zero means it *could
+not* comply, so the error is not a tuning problem at all).
+
+## Measuring the hardware rather than trusting the spec sheet
+
+The Zendure app enforces a 30 W minimum output. The hardware tracks accurately
+down to **10 W**, so the floor is a software restriction — but it turns out to
+be a well-chosen one.
+
+Fitting 8,000+ steady-state samples gives a clean loss model:
+
+```
+P_dc = 1.03 × P_ac + 21.4 W        R² = 0.991 over 8,125 samples
+```
+
+A **fixed ~21 W overhead whenever the inverter converts**, plus ~97 % marginal
+efficiency. That single constant explains the whole curve, and it puts
+efficiency at ~57 % at 30 W and ~32 % at 10 W — almost exactly where the app
+draws its line.
+
+![Measured inverter efficiency against output power, with the fitted loss model
+extrapolated below the measured range](docs/screenshots/inverter-efficiency.png)
+
+Consequence that changed the design: covering a 25 W standby load costs ~49 W of
+stored solar, not 25 W.
+
+## Engineering notes
+
+Things this project turned up that were not obvious going in:
+
+- **`batcur` is a signed int16 carried in an unsigned field.** Discharging reads
+  as `65509`, i.e. −27 → −2.7 A. Read naively it is 6.5 kA and every derived
+  figure is silently wrong.
+- **The solar cap is feedback-controlled, not feed-forward.** PV→bus efficiency
+  varies with irradiance, temperature and SoC, so a measured-once constant is
+  wrong nearly everywhere. Battery current is directly observable, so the loop
+  corrects itself against it — and only widens the cap when the cap is actually
+  binding, so legitimate surplus charging cannot ratchet it open.
+- **Sensor resolution bounds control resolution.** That feedback loop first
+  drifted for hours: `batcur` resolves to ~5 W, and the target had been set
+  finer than that, so the controller chased a setpoint it could never satisfy.
+- **The control script is tested without hardware.** A simulated Shelly runtime
+  ([`tools/simulate.js`](tools/simulate.js)) exercises the reserve gate,
+  watchdog recovery, late callbacks from abandoned cycles, solar passthrough and
+  controller convergence — 33 assertions, no device required.
+
+Every tuning decision and the evidence behind it is recorded in
+[docs/assumptions.md](docs/assumptions.md), which deliberately separates what
+was **measured** from what was merely **assumed** — the assumptions are listed
+so they can be argued with.
+
+## How it fits together
+
+```
+  Shelly Pro 3EM ──── control loop (mJS, on-device) ────► Zendure 800 Plus
+   (energy meter)         reads meter locally,              (local HTTP API)
+         │                writes setpoint every 5s                  │
+         │                                                          │
+         └──────────► Raspberry Pi ◄─────────────────────────────────┘
+                      collector + dashboard, read-only,
+                      outside the control path
+```
 
 | Path | What |
 | --- | --- |
-| `src/zendure-control.js` | The control loop. Config is a `__CONFIG_JSON__` placeholder. |
-| `config/config.example.json` | Template, committed. |
-| `config/config.local.json` | **Your real values. Gitignored.** |
-| `tools/deploy.py` | Renders config into the script and uploads it over the Shelly RPC API. |
-| `tools/collector.py` | Polls both devices and stores a time series in SQLite. Runs on the Pi. |
-| `tools/dashboard.py` | Read-only web UI over that database. Separate process from the collector. |
-| `web/index.html` | The dashboard page. Charts hand-drawn on canvas, no dependencies. |
-| `tools/discover.sh` | Dumps both devices' state into `notes/` so you can read off the real values. |
-| `build/` | Generated script with config baked in. Gitignored. |
-| `notes/` | Device dumps. Contain serials/MACs, so `notes/*.json` is gitignored. |
+| [`src/zendure-control.js`](src/zendure-control.js) | The control loop. Runs on the Shelly. |
+| [`tools/deploy.py`](tools/deploy.py) | Renders config into the script and uploads it over the Shelly RPC API. |
+| [`tools/collector.py`](tools/collector.py) | Polls both devices, stores a time series in SQLite. |
+| [`tools/dashboard.py`](tools/dashboard.py) | Read-only web UI. Separate process from the collector. |
+| [`tools/simulate.js`](tools/simulate.js) | Simulated Shelly runtime for testing without hardware. |
+| [`web/index.html`](web/index.html) | The dashboard. Charts hand-drawn on canvas, zero dependencies. |
+| [`docs/assumptions.md`](docs/assumptions.md) | Measured facts vs assumptions, and why each value is what it is. |
+| [`docs/pi-setup.md`](docs/pi-setup.md) | Setting up the logging host. |
 
-**Where secrets live:** nothing sensitive is in git. IPs, the Zendure serial and
-the Shelly password live only in `config/config.local.json` on this machine. The
-serial is not even in the config — the script reads it back from
-`/properties/report` at runtime and echoes it into the write payload.
+**Dependencies: none.** Python standard library on the Pi, mJS on the Shelly,
+plain JavaScript in the browser. Nothing to vendor, nothing to keep current, and
+it still works with no internet in five years.
+
+<details>
+<summary>Also runs on a phone</summary>
+
+<img src="docs/screenshots/mobile.png" alt="The dashboard on a narrow screen"
+     width="320">
+
+</details>
 
 ## Setup
 
@@ -48,23 +139,25 @@ Fill in the two IPs, then confirm both devices answer:
 tools/discover.sh <shelly-ip> <zendure-ip>
 ```
 
-Deploy:
+Deploy the control loop to the Shelly:
 
 ```bash
-tools/deploy.py
+python3 tools/deploy.py
 ```
 
 Watch it run:
 
 ```bash
-tools/deploy.py --logs
+python3 tools/deploy.py --logs
 ```
 
 Stop it (also disables autostart-on-boot):
 
 ```bash
-tools/deploy.py --stop
+python3 tools/deploy.py --stop
 ```
+
+For the logging host and dashboard, see [docs/pi-setup.md](docs/pi-setup.md).
 
 ## Config reference
 
