@@ -292,7 +292,24 @@ class Api:
             "samples": len(rows),
         }
 
+    # Widen until there is enough to say something. The window was fixed at
+    # 168h, which reported "not enough samples" while 8119 qualifying samples
+    # sat just outside it -- the battery had been held below its reserve for
+    # over a week, so nothing recent qualified. A fixed window makes a working
+    # feature look broken; the window actually used is reported back.
+    EFF_WINDOWS_H = (168, 336, 720, 2160)
+    EFF_MIN_SAMPLES = 200
+
     def efficiency(self, hours):
+        for h in self.EFF_WINDOWS_H:
+            if h < hours:
+                continue
+            out = self._efficiency_window(h)
+            if out["samples"] >= self.EFF_MIN_SAMPLES:
+                return out
+        return self._efficiency_window(self.EFF_WINDOWS_H[-1])
+
+    def _efficiency_window(self, hours):
         """Inverter efficiency against output power, steady-state only.
 
         Two filters, both load-bearing:
