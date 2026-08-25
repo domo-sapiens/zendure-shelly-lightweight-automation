@@ -717,19 +717,22 @@ function renderFlow(l) {
 }
 
 // ---------------------------------------------------------------- data flow
-// /api/health averages over 24h of a 240k-row table and costs ~0.29s on the
-// Pi -- half the work of a whole refresh cycle. None of what it reports (link
-// success rates, row counts, db size) changes meaningfully in 5 seconds, so it
-// is fetched on its own slower cadence and served from cache in between.
-const HEALTH_EVERY_MS = 30000;
-let healthCache = null, healthAt = 0;
+// Three endpoints are aggregates over long windows and cost far more than the
+// live reading does: on the Pi, health ~0.29s (24h of a 240k-row table),
+// energy ~0.19s (24h integral), solar ~0.07-0.39s (a daily total). None of
+// them can change meaningfully between two 5s refreshes, so each is fetched on
+// a slow cadence and served from cache in between. /api/latest is 0.006s and
+// stays live, so everything the eye actually follows still updates every 5s.
+const SLOW_EVERY_MS = 30000;
+const slowCache = {};
 
-async function getHealth() {
+async function getSlow(url) {
   const now = Date.now();
-  if (healthCache && now - healthAt < HEALTH_EVERY_MS) return healthCache;
-  const h = await get("/api/health");
-  healthCache = h; healthAt = now;
-  return h;
+  const hit = slowCache[url];
+  if (hit && now - hit.at < SLOW_EVERY_MS) return hit.data;
+  const data = await get(url);
+  slowCache[url] = { data: data, at: now };
+  return data;
 }
 
 async function get(url) {
@@ -742,8 +745,8 @@ async function get(url) {
 async function refresh(full) {
   try {
     const [l, health, energy, solar] = await Promise.all([
-      get("/api/latest"), getHealth(),
-      get("/api/energy?hours=24"), get("/api/solar")]);
+      get("/api/latest"), getSlow("/api/health"),
+      getSlow("/api/energy?hours=24"), getSlow("/api/solar")]);
     latest = l;
     if (!l.ok) { $("#updated").textContent = "no samples yet"; return; }
 
