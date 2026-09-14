@@ -14,3 +14,14 @@ notes/*.json
 # Local tooling state
 .claude/settings.local.json
 .DS_Store
+
+# Collected data is never committed: the repo is public and the database runs
+# to tens of megabytes. Archives live outside the working copy entirely
+# (see tools/archive.py, default ~/zendure-archive); these patterns only guard
+# against a stray copy landing here.
+*.db
+*.db-wal
+*.db-shm
+*.db.gz
+data/
+archive/

@@ -114,6 +114,8 @@ so they can be argued with.
 | [`web/index.html`](web/index.html) | The dashboard. Charts hand-drawn on canvas, zero dependencies. |
 | [`docs/assumptions.md`](docs/assumptions.md) | Measured facts vs assumptions, and why each value is what it is. |
 | [`docs/pi-setup.md`](docs/pi-setup.md) | Setting up the logging host. |
+| [`tools/archive.py`](tools/archive.py) | Archive the data off the host, verify it, browse it later. |
+| [`docs/archiving.md`](docs/archiving.md) | Taking the data off the Pi and resuming logging later. |
 
 **Dependencies: none.** Python standard library on the Pi, mJS on the Shelly,
 plain JavaScript in the browser. Nothing to vendor, nothing to keep current, and
