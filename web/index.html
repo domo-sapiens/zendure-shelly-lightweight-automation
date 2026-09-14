@@ -49,6 +49,7 @@
           padding:14px 16px 8px; }
   .card h2 { font-size:13px; margin:0 0 2px; font-weight:600; }
   .card .desc { color:var(--dim); font-size:12px; margin:0 0 10px; }
+  .card .desc a { color:var(--limit); }
   .legend { display:flex; gap:14px; flex-wrap:wrap; font-size:12px;
             color:var(--dim); margin-bottom:6px; }
   .legend i { display:inline-block; width:10px; height:2px; vertical-align:middle;
@@ -170,7 +171,7 @@
        hardware tracks down to 10 W. Efficiency is delivered AC ÷ DC drawn from
        the pack. <b>Steady-state samples only</b> — while the setpoint is moving,
        the AC and DC readings come from different moments and the ratio is
-       meaningless.</p>
+       meaningless. <a href="/efficiency">Full analysis and method →</a></p>
     <canvas id="c-eff" data-h="220"></canvas>
     <p class="note" id="eff-note"></p>
     <table id="eff-table"></table>

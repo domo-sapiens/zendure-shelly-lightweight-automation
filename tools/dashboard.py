@@ -301,13 +301,17 @@ class Api:
     EFF_MIN_SAMPLES = 200
 
     def efficiency(self, hours):
-        for h in self.EFF_WINDOWS_H:
-            if h < hours:
-                continue
+        # Honour the window asked for; widen only if it cannot support a
+        # conclusion. Previously the ladder was walked from its own first rung,
+        # so any request shorter than 168h silently became 168h and windows
+        # could not be compared at all.
+        ladder = [hours] + [h for h in self.EFF_WINDOWS_H if h > hours]
+        out = None
+        for h in ladder:
             out = self._efficiency_window(h)
             if out["samples"] >= self.EFF_MIN_SAMPLES:
                 return out
-        return self._efficiency_window(self.EFF_WINDOWS_H[-1])
+        return out
 
     def _efficiency_window(self, hours):
         """Inverter efficiency against output power, steady-state only.
@@ -439,6 +443,13 @@ class Handler(BaseHTTPRequestHandler):
                     "efficiency": self.api.efficiency(168),
                 }
                 tag = "<script>window.__BOOT__=%s;</script>" % json.dumps(boot)
+                html = html.replace("</head>", tag + "</head>", 1)
+                return self._send(200, html, "text/html; charset=utf-8")
+            if u.path in ("/efficiency", "/efficiency.html"):
+                with open(os.path.join(WEB_DIR, "efficiency.html")) as fh:
+                    html = fh.read()
+                tag = ("<script>window.__BOOT_EFF__=%s;</script>"
+                       % json.dumps(self.api.efficiency(168)))
                 html = html.replace("</head>", tag + "</head>", 1)
                 return self._send(200, html, "text/html; charset=utf-8")
             if u.path == "/api/latest":

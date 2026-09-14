@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inverter efficiency — Zendure zero-feed-in</title>
+<style>
+  :root {
+    --bg:#12141a; --panel:#1a1d26; --line:#2a2f3c; --fg:#e6e9f0; --dim:#8b93a7;
+    --solar:#f0b429; --actual:#57c98a; --warn:#e0a23c; --grid:#e0574a;
+    --limit:#4a9eda;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  header { padding:14px 18px; border-bottom:1px solid var(--line);
+           display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  header h1 { font-size:15px; margin:0; font-weight:600; }
+  a { color:var(--limit); }
+  .back { font-size:13px; text-decoration:none; }
+  .back:hover { text-decoration:underline; }
+  .spacer { flex:1; }
+  main { max-width:900px; margin:0 auto; padding:26px 18px 60px; }
+  h2 { font-size:19px; margin:34px 0 8px; font-weight:600; }
+  h2:first-of-type { margin-top:8px; }
+  h3 { font-size:15px; margin:22px 0 6px; }
+  p { margin:0 0 12px; }
+  .lede { font-size:16px; color:#c9cedb; }
+  .dim { color:var(--dim); }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+          padding:16px 18px; margin:18px 0; }
+  .eq { background:#20242e; border-left:3px solid var(--solar); border-radius:4px;
+        padding:12px 16px; margin:14px 0;
+        font:600 15px ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .eq small { display:block; font:400 12px/1.5 inherit; color:var(--dim);
+              font-family:-apple-system,sans-serif; margin-top:6px; }
+  canvas { width:100%; display:block; }
+  table { border-collapse:collapse; width:100%; font-size:13.5px;
+          font-variant-numeric:tabular-nums; margin-top:10px; }
+  th,td { text-align:right; padding:6px 9px; border-bottom:1px solid var(--line); }
+  th:first-child,td:first-child { text-align:left; }
+  th { color:var(--dim); font-weight:500; font-size:11px; text-transform:uppercase;
+       letter-spacing:.05em; }
+  code { background:#20242e; padding:1px 5px; border-radius:3px;
+         font:12.5px ui-monospace,Menlo,monospace; }
+  button { background:var(--panel); color:var(--fg); border:1px solid var(--line);
+           padding:5px 12px; border-radius:5px; cursor:pointer; font-size:13px; }
+  button.on { background:var(--limit); border-color:var(--limit); color:#0d1117;
+              font-weight:600; }
+  .controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+              margin-bottom:8px; }
+  .note { color:var(--dim); font-size:13px; }
+  .keyfig { display:flex; gap:26px; flex-wrap:wrap; margin:6px 0 2px; }
+  .keyfig div span { display:block; color:var(--dim); font-size:11px;
+                     text-transform:uppercase; letter-spacing:.05em; }
+  .keyfig div b { font-size:22px; font-weight:600;
+                  font-variant-numeric:tabular-nums; }
+  ul { margin:0 0 12px; padding-left:22px; }
+  li { margin-bottom:6px; }
+  .warn { color:var(--warn); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Inverter efficiency</h1>
+  <div class="spacer"></div>
+  <a class="back" href="/">← back to dashboard</a>
+</header>
+
+<main>
+
+<p class="lede">The Zendure app refuses to set an output below 30&nbsp;W. The
+hardware tracks accurately down to 10&nbsp;W, so that floor is a software
+restriction — but the logged data says it is a well-chosen one. This page shows
+the measurement, the method, and what it costs in practice.</p>
+
+<div class="card">
+  <div class="keyfig" id="keyfig"></div>
+  <p class="note" id="fitline"></p>
+</div>
+
+<h2>The loss model</h2>
+
+<p>Every sample gives an AC figure the inverter delivered and a DC figure the
+battery gave up. Plotting one against the other over thousands of samples gives
+a straight line:</p>
+
+<div class="eq" id="equation">
+  loading…
+  <small>P<sub>dc</sub> = DC drawn from the pack · P<sub>ac</sub> = AC delivered to the house</small>
+</div>
+
+<p>Two numbers fall out of it, and they mean quite different things:</p>
+
+<ul>
+  <li><b>The slope</b> is marginal efficiency: of each extra watt you ask for,
+      this fraction arrives. It is consistently ~95&nbsp;%, and it barely moves
+      between measurement windows.</li>
+  <li><b>The intercept is the interesting one.</b> It is a fixed overhead the
+      inverter draws <i>whenever it is converting at all</i>, independent of how
+      much it is delivering. Roughly 18–22&nbsp;W.</li>
+</ul>
+
+<p>That intercept explains the entire shape of the efficiency curve. Efficiency
+is not a property of the inverter so much as a consequence of dividing a fixed
+cost across a variable output:</p>
+
+<div class="eq">efficiency(P) = P / (slope × P + overhead)
+  <small>so it collapses as P approaches the overhead, and asymptotically
+  approaches 1/slope as P grows</small>
+</div>
+
+<h2>Measured curve</h2>
+
+<div class="controls">
+  <span class="dim" style="font-size:13px">Window</span>
+  <button data-h="168">7 d</button>
+  <button data-h="336">14 d</button>
+  <button data-h="720">30 d</button>
+</div>
+
+<canvas id="chart" data-h="300"></canvas>
+<p class="note" id="chartnote"></p>
+
+<table id="bins"></table>
+
+<h2>Why the 30 W floor is defensible</h2>
+
+<p id="floorpara">…</p>
+
+<p>Below roughly 30&nbsp;W the device spends more energy running the inverter
+than it delivers to the house. A manufacturer refusing to operate there is
+making a reasonable call on the owner's behalf, even though the hardware is
+physically capable of it.</p>
+
+<h2>Method, and why it is fussier than it looks</h2>
+
+<p>Two filters do almost all the work. Without them the result is not merely
+noisy — it is <span class="warn">impossible</span>, producing efficiencies above
+100&nbsp;%.</p>
+
+<h3>1. Solar must be zero</h3>
+
+<p><code>packData.power</code> is <i>net</i> pack power. While the sun is
+charging the pack and the inverter is discharging it, that figure is offset by
+generation, so dividing AC output by it overstates efficiency. The unfiltered
+query produced <b>151&nbsp;%</b> in the 70–79&nbsp;W bin, which is what exposed
+the error. Only periods with no generation measure battery-to-AC conversion.</p>
+
+<h3>2. The setpoint must be holding still</h3>
+
+<p>The AC and DC readings are not sampled simultaneously. While the setpoint is
+moving, a sample pairs an AC value from one moment with a DC value from another,
+and the ratio is meaningless in both directions. Only intervals where
+<code>outputLimit</code> was unchanged from the previous sample are used.</p>
+
+<h3>3. The intercept moves more than the slope</h3>
+
+<p>Across measurement windows the slope holds at ~95&nbsp;% while the overhead
+estimate ranges about 18–22&nbsp;W. That is expected rather than worrying: an
+intercept is extrapolated from where the data <i>is</i> down to zero, so it is
+sensitive to how much low-output operation happens to be in the window. The
+curve through the measured range is far better determined than the intercept
+alone. Treat the overhead as "about 20&nbsp;W", not a constant of nature.</p>
+
+<h2>What it costs</h2>
+
+<p id="costpara">…</p>
+
+<p>This is why the controller passes solar straight through to the house when it
+can, rather than storing it and discharging later. Storing first pays the
+conversion twice.</p>
+
+<p class="note">Everything here is computed from the logged time series — see
+<code>tools/dashboard.py</code>, and <code>docs/assumptions.md</code> for how
+this measurement changed the control design.</p>
+
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+let hours = 168, data = null;
+
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const fmt = (v, d=0) => v === null || v === undefined || isNaN(v) ? "–" : v.toFixed(d);
+
+function setup(cv) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = parseInt(cv.dataset.h);
+  if (w <= 0) return null;
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  cv.style.height = h + "px";
+  const g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  return { g, w, h };
+}
+
+function draw(e) {
+  const cv = $("#chart"), ctx = setup(cv);
+  if (!ctx) return;
+  const { g, w, h } = ctx;
+  const L = 52, R = 14, T = 12, B = 30, pw = w - L - R, ph = h - T - B;
+
+  if (!e || !e.bins.length) {
+    g.fillStyle = css("--dim"); g.font = "13px sans-serif";
+    g.fillText("not enough steady-state samples in this window", L, T + ph / 2);
+    return;
+  }
+  const maxW = Math.max(...e.bins.map(b => b.bin_w)) + 10;
+  const X = v => L + v / maxW * pw, Y = p => T + ph - (p - 40) / 60 * ph;
+
+  g.font = "11px sans-serif"; g.textAlign = "right"; g.textBaseline = "middle";
+  for (let p = 40; p <= 100; p += 10) {
+    const y = Y(p);
+    g.strokeStyle = css("--line"); g.lineWidth = 1;
+    g.beginPath(); g.moveTo(L, y + .5); g.lineTo(L + pw, y + .5); g.stroke();
+    g.fillStyle = css("--dim"); g.fillText(p + "%", L - 8, y);
+  }
+
+  // The app's floor, for comparison.
+  g.save(); g.setLineDash([4, 4]); g.strokeStyle = css("--warn");
+  g.beginPath(); g.moveTo(X(30), T); g.lineTo(X(30), T + ph); g.stroke(); g.restore();
+  g.fillStyle = css("--warn"); g.textAlign = "left"; g.textBaseline = "top";
+  g.fillText("app's 30 W floor", X(30) + 6, T + 2);
+
+  g.textAlign = "center"; g.textBaseline = "top"; g.fillStyle = css("--dim");
+  for (let i = 0; i <= 5; i++) {
+    const v = maxW * i / 5;
+    g.fillText(Math.round(v) + " W", X(v), T + ph + 9);
+  }
+
+  // p10-p90 spread behind the medians.
+  for (const b of e.bins) {
+    g.strokeStyle = "rgba(74,158,218,.28)"; g.lineWidth = 7;
+    g.beginPath();
+    g.moveTo(X(b.bin_w + 5), Y(Math.max(40, b.p10)));
+    g.lineTo(X(b.bin_w + 5), Y(Math.min(100, b.p90)));
+    g.stroke();
+  }
+
+  // Fitted model, extended into the region with no samples.
+  if (e.fit) {
+    const eff = p => 100 * p / (e.fit.slope * p + e.fit.overhead_w);
+    g.save(); g.strokeStyle = css("--warn"); g.lineWidth = 1.6;
+    g.setLineDash([5, 4]); g.beginPath();
+    let started = false;
+    for (let p = 4; p <= maxW; p += 2) {
+      const y = Y(Math.max(40, Math.min(100, eff(p)))), x = X(p);
+      started ? g.lineTo(x, y) : (g.moveTo(x, y), started = true);
+    }
+    g.stroke(); g.restore();
+  }
+
+  g.strokeStyle = css("--actual"); g.lineWidth = 2; g.beginPath();
+  e.bins.forEach((b, i) => {
+    const x = X(b.bin_w + 5), y = Y(Math.max(40, Math.min(100, b.median)));
+    i ? g.lineTo(x, y) : g.moveTo(x, y);
+  });
+  g.stroke();
+  for (const b of e.bins) {
+    g.fillStyle = css("--actual");
+    g.beginPath();
+    g.arc(X(b.bin_w + 5), Y(Math.max(40, Math.min(100, b.median))), 2.6, 0, 6.284);
+    g.fill();
+  }
+}
+
+function render(e) {
+  data = e;
+  const f = e.fit;
+
+  if (f) {
+    const eff = p => 100 * p / (f.slope * p + f.overhead_w);
+    $("#keyfig").innerHTML = `
+      <div><span>Fixed overhead</span><b>${fmt(f.overhead_w, 1)} W</b></div>
+      <div><span>Marginal efficiency</span><b>${fmt(f.marginal_eff, 1)} %</b></div>
+      <div><span>At 30 W out</span><b>${fmt(eff(30))} %</b></div>
+      <div><span>At 10 W out</span><b>${fmt(eff(10))} %</b></div>`;
+    $("#fitline").textContent =
+      `Fitted over ${e.samples.toLocaleString()} steady-state, solar-free samples ` +
+      `from the last ${e.hours} h.`;
+    $("#equation").innerHTML =
+      `P_dc = ${f.slope.toFixed(3)} × P_ac + ${f.overhead_w.toFixed(1)} W` +
+      `<small>P<sub>dc</sub> = DC drawn from the pack · ` +
+      `P<sub>ac</sub> = AC delivered to the house</small>`;
+    $("#floorpara").innerHTML =
+      `With a ${f.overhead_w.toFixed(1)} W overhead, the model puts efficiency at ` +
+      `<b>${fmt(eff(30))} % at 30 W</b>, <b>${fmt(eff(20))} % at 20 W</b> and ` +
+      `<b>${fmt(eff(10))} % at 10 W</b>. The app draws its line almost exactly ` +
+      `where the curve falls through the halfway mark.`;
+    const load = 25, dc = f.slope * load + f.overhead_w;
+    $("#costpara").innerHTML =
+      `Covering a ${load} W standby load does not cost ${load} W of stored solar — ` +
+      `it costs <b>${dc.toFixed(0)} W</b>, because the overhead is paid the whole ` +
+      `time it runs. Just over half of what the battery gives up is spent on the ` +
+      `inverter merely being switched on.`;
+  } else {
+    $("#keyfig").innerHTML = "";
+    $("#fitline").textContent =
+      `Only ${e.samples} qualifying samples in the last ${e.hours} h — not enough to fit.`;
+  }
+
+  $("#chartnote").textContent = e.bins.length
+    ? `Green is the measured median per 10 W bin; the blue band is p10–p90 (a wide `
+      + `band means few samples, not real spread). The dashed line is the fitted `
+      + `model, extended below the measured range.`
+    : "";
+
+  $("#bins").innerHTML = e.bins.length
+    ? `<tr><th>Output</th><th>Median eff.</th><th>p10–p90</th><th>Pack °C</th><th>Samples</th></tr>`
+      + e.bins.map(b => `<tr><td>${b.bin_w}–${b.bin_w + 9} W</td>
+          <td>${b.median.toFixed(1)} %</td>
+          <td>${b.p10.toFixed(0)}–${b.p90.toFixed(0)}</td>
+          <td>${b.temp === null ? "–" : b.temp.toFixed(1)}</td>
+          <td>${b.n.toLocaleString()}</td></tr>`).join("")
+    : "";
+
+  document.querySelectorAll("[data-h]").forEach(b =>
+    b.classList.toggle("on", +b.dataset.h === e.hours));
+  draw(e);
+}
+
+async function load(h) {
+  hours = h;
+  document.querySelectorAll("[data-h]").forEach(b =>
+    b.classList.toggle("on", +b.dataset.h === h));
+  const r = await fetch(`/api/efficiency?hours=${h}`);
+  render(await r.json());
+}
+
+document.querySelectorAll("[data-h]").forEach(b =>
+  b.onclick = () => load(+b.dataset.h));
+
+let rt;
+const redraw = () => { clearTimeout(rt); rt = setTimeout(() => draw(data), 60); };
+window.addEventListener("resize", redraw);
+if (window.ResizeObserver) new ResizeObserver(redraw).observe($("#chart"));
+
+// Served inline so the page is complete on first paint and needs no round trip.
+if (window.__BOOT_EFF__) render(window.__BOOT_EFF__);
+else load(168);
+</script>
+</body>
+</html>
